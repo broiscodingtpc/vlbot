@@ -400,15 +400,17 @@ def transfer_token(sender_keypair: Keypair, recipient_pubkey_str: str, mint_str:
                     # Try to create ATA with Token-2022 program (may work for some mints)
                     logger.info(f"Attempting to create Token-2022 ATA for recipient {recipient}")
                     try:
+                        # CRITICAL FIX: For Token-2022, must pass token_program_id=TOKEN_2022_PROGRAM_ID
+                        # This tells the ATA program which token program the new account will belong to
                         create_ata_ix = create_associated_token_account(
                             payer=sender_keypair.pubkey(),
                             owner=recipient,
                             mint=mint,
-                            token_program_id=TOKEN_2022_PROGRAM_ID
+                            token_program_id=TOKEN_2022_PROGRAM_ID  # Must use TOKEN_2022_PROGRAM_ID for Token-2022
                         )
                         instructions.append(create_ata_ix)
                         destination_account = destination_ata
-                        logger.info("Token-2022 ATA creation instruction added - will create in same transaction")
+                        logger.info(f"Token-2022 ATA creation instruction added with program_id={TOKEN_2022_PROGRAM_ID}")
                     except Exception as e:
                         logger.error(f"Failed to create Token-2022 ATA: {e}")
                         logger.error("Token-2022: Cannot create ATA - mint may have restrictions")
@@ -431,7 +433,7 @@ def transfer_token(sender_keypair: Keypair, recipient_pubkey_str: str, mint_str:
                         payer=sender_keypair.pubkey(),
                         owner=recipient,
                         mint=mint,
-                        token_program_id=TOKEN_PROGRAM_ID
+                        token_program_id=TOKEN_PROGRAM_ID  # Standard Token Program
                     )
                     instructions.append(create_ata_ix)
                 except Exception as e:
