@@ -20,26 +20,34 @@ class SessionManager:
     
     def _run_migration(self):
         """Run database migration to add telegram_chat_id column if needed."""
-        import sqlite3
-        import os
         from config import DB_PATH
+        from sqlalchemy import inspect, text
         
-        db_path = DB_PATH.replace('sqlite:///', '')
-        if not os.path.exists(db_path):
-            return  # Database will be created by init_db()
+        # Check if using SQLite or PostgreSQL
+        is_sqlite = DB_PATH.startswith('sqlite:///')
         
         try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute("PRAGMA table_info(sessions)")
-            columns = [column[1] for column in cursor.fetchall()]
+            from database import engine
+            inspector = inspect(engine)
+            
+            # Check if sessions table exists
+            if 'sessions' not in inspector.get_table_names():
+                logger.info("Sessions table doesn't exist yet, will be created by init_db()")
+                return
+            
+            # Get existing columns
+            columns = [col['name'] for col in inspector.get_columns('sessions')]
             
             if 'telegram_chat_id' not in columns:
                 logger.info("Adding telegram_chat_id column to sessions table...")
-                cursor.execute("ALTER TABLE sessions ADD COLUMN telegram_chat_id TEXT")
-                conn.commit()
+                with engine.connect() as conn:
+                    if is_sqlite:
+                        conn.execute(text("ALTER TABLE sessions ADD COLUMN telegram_chat_id TEXT"))
+                    else:
+                        # PostgreSQL
+                        conn.execute(text("ALTER TABLE sessions ADD COLUMN telegram_chat_id VARCHAR"))
+                    conn.commit()
                 logger.info("Migration completed: telegram_chat_id column added")
-            conn.close()
         except Exception as e:
             logger.error(f"Migration error: {e}")
     
