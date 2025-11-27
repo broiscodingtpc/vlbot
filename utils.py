@@ -265,6 +265,99 @@ def get_token_program_id(mint_str: str) -> Pubkey:
         # Default to standard token program
         return TOKEN_PROGRAM_ID
 
+def create_ata_manually(payer_keypair: Keypair, owner_pubkey: Pubkey, mint_pubkey: Pubkey, token_program_id: Pubkey = None) -> bool:
+    """Manually create ATA (Associated Token Account) with proper program ID detection."""
+    try:
+        # Detect token program ID if not provided
+        if token_program_id is None:
+            token_program_id = get_token_program_id(str(mint_pubkey))
+        
+        # Get ATA address
+        ata_address = get_associated_token_address(owner_pubkey, mint_pubkey)
+        
+        # Check if ATA already exists
+        ata_info = client.get_account_info(ata_address)
+        if ata_info.value is not None:
+            logger.info(f"ATA already exists: {ata_address}")
+            return True
+        
+        # Create ATA instruction with correct program ID
+        create_ata_ix = create_associated_token_account(
+            payer=payer_keypair.pubkey(),
+            owner=owner_pubkey,
+            mint=mint_pubkey,
+            token_program_id=token_program_id
+        )
+        
+        # Build and send transaction
+        from solders.message import Message
+        from solders.transaction import Transaction as SoldersTransaction
+        from solana.rpc.commitment import Confirmed
+        
+        recent_blockhash = client.get_latest_blockhash(commitment=Confirmed).value.blockhash
+        msg = Message([create_ata_ix], payer_keypair.pubkey())
+        txn = SoldersTransaction([payer_keypair], msg, recent_blockhash)
+        
+        result = client.send_transaction(txn)
+        if result.value:
+            logger.info(f"✅ ATA created successfully: {ata_address}")
+            return True
+        else:
+            logger.error(f"Failed to create ATA: {result}")
+            return False
+    except Exception as e:
+        logger.error(f"Error creating ATA manually: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
+
+def robust_transfer_sol(sender_keypair: Keypair, recipient_pubkey_str: str, amount_sol: float, max_retries: int = 3) -> bool:
+    """Robust SOL transfer with retries."""
+    import time
+    for attempt in range(max_retries):
+        try:
+            result = transfer_sol(sender_keypair, recipient_pubkey_str, amount_sol)
+            if result:
+                logger.info(f"✅ SOL transfer successful: {amount_sol} SOL to {recipient_pubkey_str[:8]}...")
+                return True
+        except Exception as e:
+            logger.warning(f"SOL transfer attempt {attempt + 1}/{max_retries} failed: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2)  # Use time.sleep instead of asyncio.sleep for sync function
+    
+    logger.error(f"❌ SOL transfer failed after {max_retries} attempts")
+    return False
+
+def robust_transfer_token(sender_keypair: Keypair, recipient_pubkey_str: str, mint_str: str, amount_ui: float, max_retries: int = 3) -> bool:
+    """Robust token transfer with retries and ATA creation."""
+    import time
+    # First, ensure recipient has ATA
+    try:
+        from solders.pubkey import Pubkey
+        recipient_pubkey = Pubkey.from_string(recipient_pubkey_str)
+        mint_pubkey = Pubkey.from_string(mint_str)
+        
+        # Try to create ATA if needed
+        token_program_id = get_token_program_id(mint_str)
+        create_ata_manually(sender_keypair, recipient_pubkey, mint_pubkey, token_program_id)
+    except Exception as e:
+        logger.warning(f"ATA creation/preparation failed: {e}, continuing with transfer attempt...")
+    
+    # Attempt transfer with retries
+    for attempt in range(max_retries):
+        try:
+            result = transfer_token(sender_keypair, recipient_pubkey_str, mint_str, amount_ui)
+            if result:
+                logger.info(f"✅ Token transfer successful: {amount_ui} tokens to {recipient_pubkey_str[:8]}...")
+                return True
+        except Exception as e:
+            logger.warning(f"Token transfer attempt {attempt + 1}/{max_retries} failed: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2)  # Use time.sleep instead of asyncio.sleep for sync function
+    
+    logger.error(f"❌ Token transfer failed after {max_retries} attempts")
+    return False
+
 def find_token_account_address(pubkey_str: str, mint_str: str) -> str:
     """Find the actual token account address for a wallet and mint (ATA or other)."""
     try:

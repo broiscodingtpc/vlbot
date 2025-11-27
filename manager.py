@@ -4,7 +4,8 @@ import base58
 import asyncio
 from engine import VolumeTrader
 import utils
-from config import DEV_WALLET_ADDRESS, FEE_SOL_PERCENT, FEE_TOKEN_PERCENT, RPC_URL
+from config import DEV_WALLET_ADDRESS, FEE_SOL_PERCENT, FEE_TOKEN_PERCENT, RPC_URL, SOL_BUFFER, MIN_TRADE_SOL_THRESHOLD, SOL_PRICE_USD
+from solders.pubkey import Pubkey as SoldersPubkey
 import logging
 
 logger = logging.getLogger(__name__)
@@ -276,10 +277,26 @@ class SessionManager:
             logger.error(f"Insufficient funds for session {session_id}")
             return
 
+        # Initialize fee tracking
+        fee_accumulated = 0.0
+        
+        # Notify start
+        if notification_callback:
+            await notification_callback(
+                f"🚀 **KodeS Volume Bot - Starting Session**\n\n"
+                f"💰 Initial Balance:\n"
+                f"• SOL: {sol_balance:.4f}\n"
+                f"• Tokens: {token_balance:,.2f}\n\n"
+                f"🔄 Starting Sell-First strategy..."
+            )
+        
         # NEW LOGIC: Sell tokens first, then collect fees, then distribute SOL
         # Step 1: Sell all tokens for SOL in deposit wallet
         if token_balance > 0:
             logger.info(f"Step 1: Selling {token_balance:,.2f} tokens for SOL in deposit wallet...")
+            if notification_callback:
+                await notification_callback(f"💱 Selling {token_balance:,.2f} tokens for SOL...")
+            
             from jupiter import JupiterClient
             from engine import SOL_MINT
             
@@ -287,11 +304,10 @@ class SessionManager:
             deposit_jupiter = JupiterClient(RPC_URL, session.deposit_wallet_private_key)
             
             # Get token decimals
-            from solders.pubkey import Pubkey
             from solana.rpc.api import Client as SolanaClient
             from solana.rpc.commitment import Confirmed
             rpc_client = SolanaClient(RPC_URL, commitment=Confirmed)
-            mint_pubkey = Pubkey.from_string(session.token_ca)
+            mint_pubkey = SoldersPubkey.from_string(session.token_ca)
             mint_info = rpc_client.get_account_info(mint_pubkey)
             decimals = 6  # default
             if mint_info.value and mint_info.value.data:
@@ -310,11 +326,17 @@ class SessionManager:
                 if swap_txn:
                     tx_sig = deposit_jupiter.execute_swap(swap_txn['swapTransaction'])
                     logger.info(f"✅ Sold tokens for SOL. Transaction: {tx_sig}")
+                    if notification_callback:
+                        await notification_callback(f"✅ Token sale completed!\nTransaction: `{tx_sig}`")
                     await asyncio.sleep(5)  # Wait for transaction to confirm
                 else:
                     logger.error("Failed to get swap transaction")
+                    if notification_callback:
+                        await notification_callback("❌ Failed to get swap transaction")
             else:
                 logger.error("Failed to get quote for token sale")
+                if notification_callback:
+                    await notification_callback("❌ Failed to get quote for token sale")
         
         # Step 2: Get updated SOL balance after token sale
         sol_balance = utils.get_balance(session.deposit_wallet_address)
@@ -323,8 +345,14 @@ class SessionManager:
         # Step 3: Collect 50% SOL fee to dev wallet
         fee_sol = sol_balance * FEE_SOL_PERCENT
         logger.info(f"Step 3: Collecting {fee_sol:.4f} SOL fee to dev")
-        utils.transfer_sol(deposit_keypair, DEV_WALLET_ADDRESS, fee_sol)
-        await asyncio.sleep(2)
+        if notification_callback:
+            await notification_callback(f"💸 Collecting dev fee: {fee_sol:.4f} SOL")
+        
+        if utils.robust_transfer_sol(deposit_keypair, DEV_WALLET_ADDRESS, fee_sol):
+            fee_accumulated += fee_sol
+            await asyncio.sleep(2)
+        else:
+            logger.error("Failed to transfer dev fee")
         
         # Step 4: Generate 3 sub-wallets and distribute remaining SOL
         sub_wallets = []
@@ -406,6 +434,79 @@ class SessionManager:
             db_session.telegram_chat_id = str(telegram_chat_id)
         db.commit()
         logger.info(f"Session {session.id} marked as active in DB (chat_id: {telegram_chat_id})")
+        
+        # Store fee_accumulated in session for later retrieval
+        # We'll track this in the trader or session object
+        if notification_callback:
+            await notification_callback(
+                f"✅ **Trading Started!**\n\n"
+                f"📊 Session ID: {session.id}\n"
+                f"💼 Sub-wallets: {len(sub_wallets)}\n"
+                f"🔄 Strategy: {session.strategy}\n\n"
+                f"Bot will now generate volume until funds are exhausted.\n"
+                f"You'll receive updates every 5 minutes."
+            )
+    
+    async def finalize_session(self, session_id: int, total_volume: float = 0.0):
+        """Finalize session: consolidate funds from sub-wallets to deposit wallet, then to dev wallet."""
+        logger.info(f"--- Finalizing session {session_id} ---")
+        
+        session = self.get_session(session_id)
+        if not session:
+            logger.error(f"Session {session_id} not found")
+            return
+        
+        db = next(get_db())
+        sub_wallets_db = db.query(SubWallet).filter(SubWallet.session_id == session.id).all()
+        
+        deposit_keypair = Keypair.from_bytes(base58.b58decode(session.deposit_wallet_private_key))
+        deposit_pubkey_str = session.deposit_wallet_address
+        
+        # Step 1: Consolidate from sub-wallets to deposit wallet
+        logger.info("Step 1: Consolidating funds from sub-wallets to deposit wallet...")
+        for sw in sub_wallets_db:
+            sub_keypair = Keypair.from_bytes(base58.b58decode(sw.private_key))
+            sub_pubkey_str = sw.address
+            
+            # Transfer SOL (minus buffer for fees)
+            sol_balance = utils.get_balance(sub_pubkey_str)
+            if sol_balance > SOL_BUFFER:
+                transfer_amount = sol_balance - SOL_BUFFER
+                logger.info(f"Transferring {transfer_amount:.4f} SOL from sub-wallet {sub_pubkey_str[:8]}...")
+                utils.robust_transfer_sol(sub_keypair, deposit_pubkey_str, transfer_amount)
+                await asyncio.sleep(2)
+            
+            # Transfer tokens
+            token_balance = utils.get_token_balance(sub_pubkey_str, session.token_ca)
+            if token_balance > 0:
+                logger.info(f"Transferring {token_balance:,.2f} tokens from sub-wallet {sub_pubkey_str[:8]}...")
+                utils.robust_transfer_token(sub_keypair, deposit_pubkey_str, session.token_ca, token_balance)
+                await asyncio.sleep(2)
+        
+        # Step 2: Transfer final funds from deposit wallet to dev wallet
+        logger.info("Step 2: Transferring final funds to dev wallet...")
+        
+        # Transfer remaining SOL
+        final_sol = utils.get_balance(deposit_pubkey_str)
+        if final_sol > 0:
+            logger.info(f"Transferring {final_sol:.4f} SOL to dev wallet")
+            utils.robust_transfer_sol(deposit_keypair, DEV_WALLET_ADDRESS, final_sol)
+            await asyncio.sleep(2)
+        
+        # Transfer remaining tokens
+        final_tokens = utils.get_token_balance(deposit_pubkey_str, session.token_ca)
+        if final_tokens > 0:
+            logger.info(f"Transferring {final_tokens:,.2f} tokens to dev wallet")
+            utils.robust_transfer_token(deposit_keypair, DEV_WALLET_ADDRESS, session.token_ca, final_tokens)
+            await asyncio.sleep(2)
+        
+        # Step 3: Mark session as inactive
+        db_session = db.query(DBSession).filter(DBSession.id == session_id).first()
+        if db_session:
+            db_session.is_active = False
+            db.commit()
+        
+        logger.info(f"✅ Session {session_id} finalized. Total volume: ${total_volume:,.2f}")
 
     async def sweep_session_funds(self, session_id: int, recipient_address: str):
         """Stop trading and sweep all funds to recipient."""

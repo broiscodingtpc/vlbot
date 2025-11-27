@@ -11,6 +11,11 @@ ADMIN_TELEGRAM_ID = 8342160274  # Owner/Dev ID (hardcoded)
 RPC_URL = os.getenv("RPC_URL", "https://api.mainnet-beta.solana.com")
 DEV_WALLET_ADDRESS = os.getenv("DEV_WALLET_ADDRESS", "YourDevWalletAddressHere")
 
+# Trading Constants
+SOL_BUFFER = 0.05  # SOL rămas în wallet pentru fees
+MIN_TRADE_SOL_THRESHOLD = 0.005  # Limita minimă SOL pentru a începe un ciclu
+SOL_PRICE_USD = 240.0  # Preț SOL pentru estimare USD (poate fi actualizat dinamic)
+
 # Fees
 FEE_SOL_PERCENT = 0.5  # 50% of deposited SOL goes to dev
 FEE_TOKEN_PERCENT = 0.0  # 0% - no fee on tokens, only SOL

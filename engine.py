@@ -2,7 +2,7 @@ import asyncio
 import logging
 import random
 from jupiter import JupiterClient
-from config import RPC_URL
+from config import RPC_URL, MIN_TRADE_SOL_THRESHOLD, SOL_PRICE_USD
 import utils
 import base58
 
@@ -39,16 +39,34 @@ class VolumeTrader:
         # Minimum trade amounts (in UI)
         # After 0.1 SOL deposit, 0.05 SOL goes to dev, 0.05 SOL remains
         # Each wallet gets 0.01 SOL for gas, so we need to be careful with trades
-        self.min_sol_trade = 0.01  # 0.01 SOL minimum (enough for gas + small trade)
+        self.min_sol_trade = MIN_TRADE_SOL_THRESHOLD  # Use config constant
         self.min_token_trade = 10  # 10 tokens minimum
+        self.sol_price_usd = SOL_PRICE_USD  # SOL price for volume calculation
 
     async def start(self):
         import time
         self.last_report_time = time.time()
         logger.info(f"Session {self.session_id}: Starting trading loop ({self.strategy}) - BUY FIRST (sub-wallets have SOL)")
         
+        cycle = 1
+        
         while self.running:
             try:
+                # Check if we have sufficient capital to continue trading
+                can_trade = await self._check_sufficient_capital()
+                if not can_trade:
+                    logger.info(f"Session {self.session_id}: Insufficient capital. Stopping trading.")
+                    if self.notification_callback:
+                        await self.notification_callback(
+                            f"⏹️ **Trading Stopped - Funds Exhausted**\n\n"
+                            f"📊 **Final Stats:**\n"
+                            f"• Total Volume: ${self.session_volume_usd:,.2f}\n"
+                            f"• Total Trades: {self.trade_count}\n"
+                            f"• Cycles Completed: {cycle}\n\n"
+                            f"💡 Session will be finalized. Remaining funds will be swept."
+                        )
+                    break
+                
                 # Check for 5-minute report
                 current_time = time.time()
                 if current_time - self.last_report_time >= 300:  # 300 seconds = 5 minutes
@@ -56,30 +74,79 @@ class VolumeTrader:
                     self.last_report_time = current_time
                     self.volume_since_last_report = 0.0
 
-                client = random.choice(self.clients)
+                # Execute BUY cycle (all wallets buy tokens with SOL)
+                buy_results = await self._execute_buy_cycle()
                 
-                # SELL = vinde tokens pentru SOL
-                # BUY = cumpara tokens cu SOL
-                if self.current_action == "SELL":
-                    input_mint = self.token_ca  # Vinde tokens
-                    output_mint = SOL_MINT
-                else:
-                    input_mint = SOL_MINT  # Cumpara tokens
-                    output_mint = self.token_ca
+                # Wait a bit between buy and sell
+                await asyncio.sleep(5)
                 
-                await self.execute_trade(client, input_mint, output_mint)
+                # Execute SELL cycle (all wallets sell tokens for SOL)
+                sell_results = await self._execute_sell_cycle()
                 
-                # Toggle: SELL -> BUY -> SELL -> BUY
-                self.current_action = "BUY" if self.current_action == "SELL" else "SELL"
-                self.trade_count += 1
+                # Notify cycle completion
+                await self._notify_cycle_status(cycle)
+                
+                cycle += 1
                 
                 delay = random.randint(*self.delays[self.strategy])
-                logger.info(f"Session {self.session_id}: Sleeping {delay}s after {self.current_action}")
+                logger.info(f"Session {self.session_id}: Cycle {cycle} completed. Sleeping {delay}s")
                 await asyncio.sleep(delay)
                 
             except Exception as e:
                 logger.error(f"Session {self.session_id}: Error in trading loop: {e}")
                 await asyncio.sleep(10)
+    
+    async def _check_sufficient_capital(self) -> bool:
+        """Check if at least 50% of wallets have sufficient capital to continue trading."""
+        active_wallets = 0
+        for wallet in self.wallets:
+            pubkey_str = str(wallet.pubkey())
+            sol_balance = utils.get_balance(pubkey_str)
+            if sol_balance >= self.min_sol_trade:
+                active_wallets += 1
+        
+        # Need at least 50% of wallets to be active
+        threshold = len(self.wallets) / 2
+        can_continue = active_wallets > threshold
+        
+        logger.info(f"Session {self.session_id}: Capital check - {active_wallets}/{len(self.wallets)} wallets active (threshold: {threshold})")
+        return can_continue
+    
+    async def _execute_buy_cycle(self):
+        """Execute BUY trades for all wallets in parallel."""
+        tasks = []
+        for client in self.clients:
+            tasks.append(self.execute_trade(client, SOL_MINT, self.token_ca))
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        successful = sum(1 for r in results if r is not None and not isinstance(r, Exception))
+        logger.info(f"Session {self.session_id}: BUY cycle - {successful}/{len(self.clients)} successful")
+        return results
+    
+    async def _execute_sell_cycle(self):
+        """Execute SELL trades for all wallets in parallel."""
+        tasks = []
+        for client in self.clients:
+            tasks.append(self.execute_trade(client, self.token_ca, SOL_MINT))
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        successful = sum(1 for r in results if r is not None and not isinstance(r, Exception))
+        logger.info(f"Session {self.session_id}: SELL cycle - {successful}/{len(self.clients)} successful")
+        return results
+    
+    async def _notify_cycle_status(self, cycle: int):
+        """Send cycle status update."""
+        if self.notification_callback:
+            msg = (
+                f"📈 **Cycle #{cycle} Completed**\n\n"
+                f"🚀 **Total Volume:** ${self.session_volume_usd:,.2f} USD\n"
+                f"🔄 **Total Trades:** {self.trade_count}\n\n"
+                f"✅ Bot running smoothly!"
+            )
+            try:
+                await self.notification_callback(msg)
+            except Exception as e:
+                logger.error(f"Failed to send cycle status: {e}")
 
     async def send_periodic_report(self):
         if self.notification_callback:
@@ -181,15 +248,8 @@ class VolumeTrader:
                     # Output is SOL (approx)
                     sol_amount = int(quote.get('outAmount', 0)) / 10**9
                 
-                # Assume SOL = $240 (hardcoded for now or fetch)
-                # Ideally fetch real price, but for speed we can use a fixed rate or fetch occasionally
-                # Let's fetch from DexScreener if possible, or just use a standard rate for estimation
-                # For now, let's use a rough estimate or fetch if we can. 
-                # Actually, we can use the 'outAmount' if output is USDC, but it's not.
-                # Let's use a fixed SOL price for volume estimation to avoid API spam, or fetch in __init__
-                
-                sol_price = 240.0 # Approximate
-                trade_value_usd = sol_amount * sol_price
+                # Use SOL price from config
+                trade_value_usd = sol_amount * self.sol_price_usd
                 
                 self.session_volume_usd += trade_value_usd
                 self.volume_since_last_report += trade_value_usd
