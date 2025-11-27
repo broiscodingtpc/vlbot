@@ -311,22 +311,39 @@ def create_ata_manually(payer_keypair: Keypair, owner_pubkey: Pubkey, mint_pubke
         logger.error(traceback.format_exc())
         return False
 
-def robust_transfer_sol(sender_keypair: Keypair, recipient_pubkey_str: str, amount_sol: float, max_retries: int = 3) -> bool:
-    """Robust SOL transfer with retries."""
+def robust_transfer_sol(sender_keypair: Keypair, recipient_pubkey_str: str, amount_sol: float, max_retries: int = 3) -> str:
+    """Robust SOL transfer with retries. Returns transaction signature on success, None on failure."""
     import time
+    
+    # Validate inputs
+    if amount_sol <= 0:
+        logger.error(f"Invalid transfer amount: {amount_sol} SOL")
+        return None
+    
+    if not recipient_pubkey_str or recipient_pubkey_str == "YourDevWalletAddressHere":
+        logger.error(f"Invalid recipient address: {recipient_pubkey_str}")
+        return None
+    
+    logger.info(f"Attempting to transfer {amount_sol:.4f} SOL to {recipient_pubkey_str[:8]}...")
+    
     for attempt in range(max_retries):
         try:
             result = transfer_sol(sender_keypair, recipient_pubkey_str, amount_sol)
             if result:
-                logger.info(f"✅ SOL transfer successful: {amount_sol} SOL to {recipient_pubkey_str[:8]}...")
-                return True
+                logger.info(f"✅ SOL transfer successful: {amount_sol} SOL to {recipient_pubkey_str[:8]}... | TX: {result}")
+                return result
+            else:
+                logger.warning(f"SOL transfer attempt {attempt + 1}/{max_retries} returned None")
         except Exception as e:
             logger.warning(f"SOL transfer attempt {attempt + 1}/{max_retries} failed: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2)  # Use time.sleep instead of asyncio.sleep for sync function
+            import traceback
+            logger.debug(traceback.format_exc())
+        
+        if attempt < max_retries - 1:
+            time.sleep(2)  # Use time.sleep instead of asyncio.sleep for sync function
     
-    logger.error(f"❌ SOL transfer failed after {max_retries} attempts")
-    return False
+    logger.error(f"❌ SOL transfer failed after {max_retries} attempts to {recipient_pubkey_str[:8]}...")
+    return None
 
 def robust_transfer_token(sender_keypair: Keypair, recipient_pubkey_str: str, mint_str: str, amount_ui: float, max_retries: int = 3) -> bool:
     """Robust token transfer with retries and ATA creation."""

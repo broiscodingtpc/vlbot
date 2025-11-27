@@ -242,7 +242,6 @@ class SessionManager:
                 from solders.pubkey import Pubkey
                 from spl.token.instructions import get_associated_token_address
                 from solana.rpc.api import Client
-                from config import RPC_URL
                 from solana.rpc.commitment import Confirmed
                 
                 rpc_client = Client(RPC_URL, commitment=Confirmed)
@@ -301,6 +300,7 @@ class SessionManager:
             from engine import SOL_MINT
             
             # Create Jupiter client for deposit wallet
+            # RPC_URL is imported at the top of the file, use it directly
             deposit_jupiter = JupiterClient(RPC_URL, session.deposit_wallet_private_key)
             
             # Get token decimals
@@ -585,9 +585,9 @@ class SessionManager:
                 from solders.pubkey import Pubkey
                 from spl.token.instructions import get_associated_token_address
                 from solana.rpc.api import Client
-                from config import RPC_URL
                 from solana.rpc.commitment import Confirmed
                 
+                # RPC_URL is already imported at the top of the file
                 rpc_client = Client(RPC_URL, commitment=Confirmed)
                 mint = Pubkey.from_string(session.token_ca)
                 ata = get_associated_token_address(Pubkey.from_string(pubkey), mint)
