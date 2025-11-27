@@ -108,30 +108,49 @@ class JupiterClient:
             payer_pubkey = self.keypair.pubkey()
             logger.info(f"Signing transaction with payer: {str(payer_pubkey)[:8]}...")
             
-            # CRITICAL FIX: For VersionedTransaction, we need to use partial_sign
-            # Jupiter returns a transaction that needs to be signed by the user (payer)
-            # The transaction already has the payer set, we just need to sign it correctly
+            # CRITICAL FIX: For VersionedTransaction, we need to find the correct signature index
+            # Jupiter returns a transaction with placeholder signatures that need to be replaced
+            # We need to find which signature index corresponds to our payer pubkey
             
-            # Method 1: Use partial_sign (recommended for VersionedTransaction)
+            message_bytes = bytes(txn.message)
+            signature = self.keypair.sign_message(message_bytes)
+            
+            # Find the index of payer in the account keys (static_accounts)
+            # The signature index corresponds to the position in static_accounts
             try:
-                # partial_sign adds our signature to the transaction
-                txn.partial_sign([self.keypair])
-                logger.debug(f"Transaction signed using partial_sign")
-            except Exception as partial_sign_error:
-                logger.warning(f"partial_sign failed: {partial_sign_error}, trying manual signing...")
-                # Fallback: Manual signing
-                message_bytes = bytes(txn.message)
-                signature = self.keypair.sign_message(message_bytes)
+                # Get static account keys from the message
+                static_account_keys = txn.message.static_account_keys()
                 
-                # Find the index of our pubkey in the signers list
-                # The first signer is usually the payer
-                if len(txn.signatures) == 0:
-                    logger.error("Transaction has no signatures array")
+                # Find the index of our payer pubkey
+                payer_index = None
+                for i, key in enumerate(static_account_keys):
+                    if str(key) == str(payer_pubkey):
+                        payer_index = i
+                        break
+                
+                if payer_index is None:
+                    logger.error(f"Payer pubkey {str(payer_pubkey)[:8]}... not found in transaction account keys")
+                    # Fallback: assume first signature is payer (common case)
+                    payer_index = 0
+                    logger.warning(f"Using index 0 as fallback for payer signature")
+                
+                # Replace the signature at the correct index
+                if len(txn.signatures) <= payer_index:
+                    logger.error(f"Transaction has {len(txn.signatures)} signatures, but need index {payer_index}")
                     return None
                 
-                # Replace the first signature (payer signature)
-                txn.signatures[0] = signature
-                logger.debug(f"Transaction signed manually, signature index 0 replaced")
+                txn.signatures[payer_index] = signature
+                logger.info(f"Transaction signed: replaced signature at index {payer_index} for payer {str(payer_pubkey)[:8]}...")
+                
+            except Exception as signing_error:
+                logger.error(f"Error finding payer index: {signing_error}")
+                # Fallback: try index 0 (most common case)
+                if len(txn.signatures) > 0:
+                    txn.signatures[0] = signature
+                    logger.warning(f"Using fallback: replaced signature at index 0")
+                else:
+                    logger.error("Transaction has no signatures array")
+                    return None
             
             # Verify we have signatures
             if len(txn.signatures) == 0:
