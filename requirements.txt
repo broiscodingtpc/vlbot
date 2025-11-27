@@ -1,4 +1,4 @@
-python-telegram-bot==20.7
+python-telegram-bot==20.5
 sqlalchemy==2.0.25
 solana==0.32.0
 solders==0.20.0
