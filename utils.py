@@ -397,23 +397,23 @@ def transfer_token(sender_keypair: Keypair, recipient_pubkey_str: str, mint_str:
                     logger.info(f"Using existing token account: {recipient_token_account[:8]}...")
                     instructions = []
                 else:
-                    # Try to create ATA with Token-2022 program (may work for some mints)
+                    # For Token-2022, try to create ATA, but many mints have restrictions
                     logger.info(f"Attempting to create Token-2022 ATA for recipient {recipient}")
+                    logger.warning("Token-2022: Some mints don't allow ATA creation. If this fails, recipient must have existing token account.")
                     try:
                         # CRITICAL FIX: For Token-2022, must pass token_program_id=TOKEN_2022_PROGRAM_ID
-                        # This tells the ATA program which token program the new account will belong to
                         create_ata_ix = create_associated_token_account(
                             payer=sender_keypair.pubkey(),
                             owner=recipient,
                             mint=mint,
-                            token_program_id=TOKEN_2022_PROGRAM_ID  # Must use TOKEN_2022_PROGRAM_ID for Token-2022
+                            token_program_id=TOKEN_2022_PROGRAM_ID
                         )
                         instructions.append(create_ata_ix)
                         destination_account = destination_ata
                         logger.info(f"Token-2022 ATA creation instruction added with program_id={TOKEN_2022_PROGRAM_ID}")
                     except Exception as e:
-                        logger.error(f"Failed to create Token-2022 ATA: {e}")
-                        logger.error("Token-2022: Cannot create ATA - mint may have restrictions")
+                        logger.error(f"Failed to create Token-2022 ATA instruction: {e}")
+                        logger.error("Token-2022: Cannot create ATA - mint has restrictions. Recipient must have existing token account.")
                         return None
             else:
                 destination_account = destination_ata
@@ -528,6 +528,20 @@ def transfer_token(sender_keypair: Keypair, recipient_pubkey_str: str, mint_str:
         
         # Create and sign Transaction
         txn = SoldersTransaction([sender_keypair], msg, recent_blockhash)
+        
+        # For Token-2022 with ATA creation, check if transaction will fail before sending
+        if is_token_2022 and len(instructions) > 1:
+            # Transaction includes ATA creation - simulate first to check if it will fail
+            try:
+                simulate_result = client.simulate_transaction(txn)
+                if simulate_result.value and simulate_result.value.err:
+                    error_msg = str(simulate_result.value.err)
+                    if "Provided owner is not allowed" in error_msg or "IllegalOwner" in error_msg:
+                        logger.error("Token-2022: Mint doesn't allow ATA creation for this recipient")
+                        logger.error("Recipient must have an existing token account for this Token-2022 mint")
+                        return None
+            except Exception as e:
+                logger.warning(f"Simulation check failed: {e}, proceeding with transaction anyway")
         
         result = client.send_transaction(txn)
         if result.value:
