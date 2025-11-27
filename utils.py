@@ -238,6 +238,33 @@ def transfer_sol(sender_keypair: Keypair, recipient_pubkey_str: str, amount_sol:
         traceback.print_exc()
         return None
 
+def get_token_program_id(mint_str: str) -> Pubkey:
+    """Detect the token program ID (TOKEN_PROGRAM_ID or TOKEN_2022_PROGRAM_ID) by checking mint owner."""
+    try:
+        mint = Pubkey.from_string(mint_str)
+        
+        # Get mint account info to check owner
+        mint_info = client.get_account_info(mint)
+        
+        if not mint_info.value:
+            logger.warning(f"Mint {mint_str[:8]}... not found, defaulting to TOKEN_PROGRAM_ID")
+            return TOKEN_PROGRAM_ID
+        
+        # Get the owner (program ID) of the mint account
+        mint_owner = mint_info.value.owner
+        
+        # Compare with known program IDs
+        if str(mint_owner) == str(TOKEN_2022_PROGRAM_ID):
+            logger.info(f"Mint {mint_str[:8]}... is Token-2022 (owner: {mint_owner})")
+            return TOKEN_2022_PROGRAM_ID
+        else:
+            logger.info(f"Mint {mint_str[:8]}... is Standard Token (owner: {mint_owner})")
+            return TOKEN_PROGRAM_ID
+    except Exception as e:
+        logger.error(f"Error detecting token program ID for {mint_str[:8]}...: {e}")
+        # Default to standard token program
+        return TOKEN_PROGRAM_ID
+
 def find_token_account_address(pubkey_str: str, mint_str: str) -> str:
     """Find the actual token account address for a wallet and mint (ATA or other)."""
     try:
@@ -355,93 +382,68 @@ def transfer_token(sender_keypair: Keypair, recipient_pubkey_str: str, mint_str:
         source_account = Pubkey.from_string(source_account_str)
         logger.info(f"Using token account {source_account_str[:8]}... for transfer")
         
-        # Verify source account is valid and owned by TOKEN_PROGRAM_ID or TOKEN_2022_PROGRAM_ID
+        # CRITICAL FIX: Detect token program ID from mint owner (not from source account)
+        # This ensures we use the correct program ID for both ATA creation and transfer
+        token_program_id = get_token_program_id(mint_str)
+        is_token_2022 = token_program_id == TOKEN_2022_PROGRAM_ID
+        
+        if is_token_2022:
+            logger.info(f"Detected Token-2022 mint - using TOKEN_2022_PROGRAM_ID")
+        else:
+            logger.info(f"Detected Standard Token mint - using TOKEN_PROGRAM_ID")
+        
+        # Verify source account is valid and owned by the correct token program
         source_info = client.get_account_info(source_account)
         if source_info.value is None:
             logger.error(f"Source token account {source_account_str[:8]}... does not exist")
             return None
         
-        # Verify it's a token account (check owner is TOKEN_PROGRAM_ID or TOKEN_2022_PROGRAM_ID)
+        # Verify it's a token account (check owner matches detected program ID)
         owner_str = str(source_info.value.owner)
-        from spl.token.constants import TOKEN_2022_PROGRAM_ID
-        if owner_str != str(TOKEN_PROGRAM_ID) and owner_str != str(TOKEN_2022_PROGRAM_ID):
-            logger.error(f"Source account {source_account_str[:8]}... is not a token account (owner: {owner_str})")
+        if owner_str != str(token_program_id):
+            logger.error(f"Source account {source_account_str[:8]}... owner mismatch: {owner_str} vs {token_program_id}")
             return None
         
-        # Determine which program to use
-        is_token_2022 = owner_str == str(TOKEN_2022_PROGRAM_ID)
-        if is_token_2022:
-            logger.info(f"Source account uses Token-2022 Program")
-        else:
-            logger.info(f"Source account uses Token Program")
+        # Use dynamically detected token_program_id for both standard and Token-2022
+        destination_ata = get_associated_token_address(recipient, mint)
+        logger.info(f"Destination ATA address: {destination_ata}")
         
-        # For Token-2022, try to use ATA with Token-2022 program
-        if is_token_2022:
-            logger.info("Token-2022 detected, attempting to use/create ATA...")
-            from spl.token.constants import TOKEN_2022_PROGRAM_ID
-            
-            # Try to get ATA address for Token-2022 (same calculation as standard)
-            destination_ata = get_associated_token_address(recipient, mint)
-            logger.info(f"Token-2022 ATA address: {destination_ata}")
-            
-            instructions = []
-            
-            # Check if dest ATA exists
-            dest_info = client.get_account_info(destination_ata)
-            if dest_info.value is None:
-                logger.info(f"Token-2022 ATA doesn't exist, checking if recipient has any token account...")
-                # First check if recipient has any token account for this mint
-                recipient_token_account = find_token_account_address(recipient_pubkey_str, mint_str)
-                if recipient_token_account:
-                    destination_account = Pubkey.from_string(recipient_token_account)
-                    logger.info(f"Using existing token account: {recipient_token_account[:8]}...")
-                    instructions = []
-                else:
-                    # For Token-2022, try to create ATA, but many mints have restrictions
-                    logger.info(f"Attempting to create Token-2022 ATA for recipient {recipient}")
-                    logger.warning("Token-2022: Some mints don't allow ATA creation. If this fails, recipient must have existing token account.")
-                    try:
-                        # CRITICAL FIX: For Token-2022, must pass token_program_id=TOKEN_2022_PROGRAM_ID
-                        create_ata_ix = create_associated_token_account(
-                            payer=sender_keypair.pubkey(),
-                            owner=recipient,
-                            mint=mint,
-                            token_program_id=TOKEN_2022_PROGRAM_ID
-                        )
-                        instructions.append(create_ata_ix)
-                        destination_account = destination_ata
-                        logger.info(f"Token-2022 ATA creation instruction added with program_id={TOKEN_2022_PROGRAM_ID}")
-                    except Exception as e:
-                        logger.error(f"Failed to create Token-2022 ATA instruction: {e}")
-                        logger.error("Token-2022: Cannot create ATA - mint has restrictions. Recipient must have existing token account.")
-                        return None
+        instructions = []
+        
+        # Check if dest ATA exists
+        dest_info = client.get_account_info(destination_ata)
+        if dest_info.value is None:
+            logger.info(f"ATA doesn't exist, checking if recipient has any token account...")
+            # First check if recipient has any token account for this mint
+            recipient_token_account = find_token_account_address(recipient_pubkey_str, mint_str)
+            if recipient_token_account:
+                destination_account = Pubkey.from_string(recipient_token_account)
+                logger.info(f"Using existing token account: {recipient_token_account[:8]}...")
+                instructions = []
             else:
-                destination_account = destination_ata
-                logger.info(f"Token-2022 ATA already exists: {destination_ata}")
-        else:
-            # For standard Token, use ATA
-            destination_ata = get_associated_token_address(recipient, mint)
-            instructions = []
-            
-            # Check if dest ATA exists, create if not
-            dest_info = client.get_account_info(destination_ata)
-            if dest_info.value is None:
-                logger.info(f"Creating ATA for recipient {recipient}")
+                # Try to create ATA with the correct program ID (detected from mint)
+                logger.info(f"Attempting to create ATA for recipient {recipient} with program_id={token_program_id}")
                 try:
-                    # Create ATA instruction with explicit token_program_id
+                    # CRITICAL FIX: Use dynamically detected token_program_id
                     create_ata_ix = create_associated_token_account(
                         payer=sender_keypair.pubkey(),
                         owner=recipient,
                         mint=mint,
-                        token_program_id=TOKEN_PROGRAM_ID  # Standard Token Program
+                        token_program_id=token_program_id  # Use detected program ID
                     )
                     instructions.append(create_ata_ix)
+                    destination_account = destination_ata
+                    logger.info(f"ATA creation instruction added with program_id={token_program_id}")
                 except Exception as e:
                     logger.error(f"Failed to create ATA instruction: {e}")
-                    logger.error("Cannot create ATA for recipient")
+                    if is_token_2022:
+                        logger.error("Token-2022: Cannot create ATA - mint may have restrictions. Recipient must have existing token account.")
+                    else:
+                        logger.error("Cannot create ATA for recipient")
                     return None
-            
+        else:
             destination_account = destination_ata
+            logger.info(f"ATA already exists: {destination_ata}")
             
         # Fetch mint info to get decimals
         mint_info = client.get_account_info(mint)
@@ -462,9 +464,8 @@ def transfer_token(sender_keypair: Keypair, recipient_pubkey_str: str, mint_str:
             print(f"Amount too small: {amount_ui}")
             return None
         
-        # Use the correct program ID based on source account
-        from spl.token.constants import TOKEN_2022_PROGRAM_ID
-        program_id = TOKEN_2022_PROGRAM_ID if is_token_2022 else TOKEN_PROGRAM_ID
+        # Use the dynamically detected token_program_id for transfer
+        program_id = token_program_id
         logger.info(f"Using program ID: {program_id} for transfer")
         
         # For Token-2022, use transfer (not transfer_checked) as it's more compatible
