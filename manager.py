@@ -444,7 +444,28 @@ class SessionManager:
                 if tx:
                     report.append(f"✅ Sent {token_balance:,.2f} Tokens from {pubkey[:6]}..: {tx}")
                 else:
-                    report.append(f"⚠️ Failed to transfer {token_balance:,.2f} Tokens from {pubkey[:6]}..")
+                    # Check if this is a Token-2022 with restrictions
+                    from solders.pubkey import Pubkey
+                    from solana.rpc.api import Client as SolanaClient
+                    from solana.rpc.commitment import Confirmed
+                    from config import RPC_URL
+                    rpc_client = SolanaClient(RPC_URL, commitment=Confirmed)
+                    source_account_str = utils.find_token_account_address(str(kp.pubkey()), session.token_ca)
+                    if source_account_str:
+                        source_info = rpc_client.get_account_info(Pubkey.from_string(source_account_str))
+                        if source_info.value:
+                            owner_str = str(source_info.value.owner)
+                            from spl.token.constants import TOKEN_2022_PROGRAM_ID
+                            if owner_str == str(TOKEN_2022_PROGRAM_ID):
+                                report.append(f"⚠️ Token-2022 transfer failed: {token_balance:,.2f} Tokens from {pubkey[:6]}..")
+                                report.append(f"💡 Your wallet must have an existing token account for this Token-2022 mint to receive tokens.")
+                                report.append(f"📝 Token CA: `{session.token_ca}`")
+                            else:
+                                report.append(f"⚠️ Failed to transfer {token_balance:,.2f} Tokens from {pubkey[:6]}..")
+                        else:
+                            report.append(f"⚠️ Failed to transfer {token_balance:,.2f} Tokens from {pubkey[:6]}..")
+                    else:
+                        report.append(f"⚠️ Failed to transfer {token_balance:,.2f} Tokens from {pubkey[:6]}..")
                 await asyncio.sleep(1)
             else:
                 # Try to transfer anyway - maybe ATA exists but balance check failed
