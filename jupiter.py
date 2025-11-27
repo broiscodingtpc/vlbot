@@ -115,42 +115,45 @@ class JupiterClient:
             message_bytes = bytes(txn.message)
             signature = self.keypair.sign_message(message_bytes)
             
-            # Find the index of payer in the account keys (static_accounts)
-            # The signature index corresponds to the position in static_accounts
+            # Find the index of payer in the account keys
+            # For Jupiter transactions, the payer is typically the first signer (index 0)
+            # But we should verify by checking the account keys in the message
+            payer_index = 0  # Default to first signature (most common case)
+            
             try:
-                # Get static account keys from the message
-                static_account_keys = txn.message.static_account_keys()
-                
-                # Find the index of our payer pubkey
-                payer_index = None
-                for i, key in enumerate(static_account_keys):
-                    if str(key) == str(payer_pubkey):
-                        payer_index = i
-                        break
-                
-                if payer_index is None:
-                    logger.error(f"Payer pubkey {str(payer_pubkey)[:8]}... not found in transaction account keys")
-                    # Fallback: assume first signature is payer (common case)
-                    payer_index = 0
-                    logger.warning(f"Using index 0 as fallback for payer signature")
-                
-                # Replace the signature at the correct index
-                if len(txn.signatures) <= payer_index:
-                    logger.error(f"Transaction has {len(txn.signatures)} signatures, but need index {payer_index}")
-                    return None
-                
-                txn.signatures[payer_index] = signature
-                logger.info(f"Transaction signed: replaced signature at index {payer_index} for payer {str(payer_pubkey)[:8]}...")
-                
-            except Exception as signing_error:
-                logger.error(f"Error finding payer index: {signing_error}")
-                # Fallback: try index 0 (most common case)
-                if len(txn.signatures) > 0:
-                    txn.signatures[0] = signature
-                    logger.warning(f"Using fallback: replaced signature at index 0")
+                # Try to get account keys from the message to find payer index
+                # VersionedTransaction message has account_keys() method
+                if hasattr(txn.message, 'account_keys'):
+                    account_keys = txn.message.account_keys()
+                    # Find payer index in account keys
+                    for i, key in enumerate(account_keys):
+                        if str(key) == str(payer_pubkey):
+                            payer_index = i
+                            logger.debug(f"Found payer at account key index {i}")
+                            break
+                elif hasattr(txn.message, 'static_account_keys'):
+                    # Alternative method name
+                    account_keys = txn.message.static_account_keys()
+                    for i, key in enumerate(account_keys):
+                        if str(key) == str(payer_pubkey):
+                            payer_index = i
+                            logger.debug(f"Found payer at static account key index {i}")
+                            break
                 else:
-                    logger.error("Transaction has no signatures array")
-                    return None
+                    # If we can't find the method, use index 0 (payer is usually first)
+                    logger.debug("Could not access account_keys, using index 0 for payer")
+                    payer_index = 0
+            except Exception as key_error:
+                logger.warning(f"Could not determine payer index from message: {key_error}, using index 0")
+                payer_index = 0
+            
+            # Replace the signature at the correct index
+            if len(txn.signatures) <= payer_index:
+                logger.error(f"Transaction has {len(txn.signatures)} signatures, but need index {payer_index}")
+                return None
+            
+            txn.signatures[payer_index] = signature
+            logger.info(f"Transaction signed: replaced signature at index {payer_index} for payer {str(payer_pubkey)[:8]}...")
             
             # Verify we have signatures
             if len(txn.signatures) == 0:
