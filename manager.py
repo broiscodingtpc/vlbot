@@ -4,7 +4,7 @@ import base58
 import asyncio
 from engine import VolumeTrader
 import utils
-from config import DEV_WALLET_ADDRESS, FEE_SOL_PERCENT, FEE_TOKEN_PERCENT
+from config import DEV_WALLET_ADDRESS, FEE_SOL_PERCENT, FEE_TOKEN_PERCENT, RPC_URL
 import logging
 
 logger = logging.getLogger(__name__)
@@ -282,7 +282,6 @@ class SessionManager:
             logger.info(f"Step 1: Selling {token_balance:,.2f} tokens for SOL in deposit wallet...")
             from jupiter import JupiterClient
             from engine import SOL_MINT
-            import base58
             
             # Create Jupiter client for deposit wallet
             deposit_jupiter = JupiterClient(RPC_URL, session.deposit_wallet_private_key)
