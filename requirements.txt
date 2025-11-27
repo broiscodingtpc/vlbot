@@ -1,6 +1,6 @@
 python-telegram-bot==20.8
 sqlalchemy==2.0.25
-solana==0.32.0
+solana==0.35.0
 solders==0.20.0
 requests==2.31.0
 python-dotenv==1.0.1
