@@ -457,9 +457,19 @@ class SessionManager:
                             owner_str = str(source_info.value.owner)
                             from spl.token.constants import TOKEN_2022_PROGRAM_ID
                             if owner_str == str(TOKEN_2022_PROGRAM_ID):
-                                report.append(f"⚠️ Token-2022 transfer failed: {token_balance:,.2f} Tokens from {pubkey[:6]}..")
-                                report.append(f"💡 Your wallet must have an existing token account for this Token-2022 mint to receive tokens.")
-                                report.append(f"📝 Token CA: `{session.token_ca}`")
+                                report.append(f"⚠️ **Token-2022 Transfer Failed**")
+                                report.append(f"💰 Amount: {token_balance:,.2f} Tokens")
+                                report.append(f"")
+                                report.append(f"**Problem:** This Token-2022 mint has restrictions and doesn't allow automatic token account creation.")
+                                report.append(f"")
+                                report.append(f"**Solution:**")
+                                report.append(f"1. Your wallet must have an existing token account for this mint")
+                                report.append(f"2. Receive at least 1 token from this mint first (creates the account)")
+                                report.append(f"3. Then try withdraw again")
+                                report.append(f"")
+                                report.append(f"**Token Contract:** `{session.token_ca}`")
+                                report.append(f"")
+                                report.append(f"💡 *Tip: You can create the token account by receiving a small amount from another wallet first.*")
                             else:
                                 report.append(f"⚠️ Failed to transfer {token_balance:,.2f} Tokens from {pubkey[:6]}..")
                         else:

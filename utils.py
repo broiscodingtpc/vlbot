@@ -529,17 +529,25 @@ def transfer_token(sender_keypair: Keypair, recipient_pubkey_str: str, mint_str:
         # Create and sign Transaction
         txn = SoldersTransaction([sender_keypair], msg, recent_blockhash)
         
-        # For Token-2022 with ATA creation, check if transaction will fail before sending
+        # For Token-2022 with ATA creation, simulate first to check if it will fail
         if is_token_2022 and len(instructions) > 1:
             # Transaction includes ATA creation - simulate first to check if it will fail
             try:
                 simulate_result = client.simulate_transaction(txn)
-                if simulate_result.value and simulate_result.value.err:
-                    error_msg = str(simulate_result.value.err)
-                    if "Provided owner is not allowed" in error_msg or "IllegalOwner" in error_msg:
-                        logger.error("Token-2022: Mint doesn't allow ATA creation for this recipient")
-                        logger.error("Recipient must have an existing token account for this Token-2022 mint")
-                        return None
+                if simulate_result.value:
+                    if simulate_result.value.err:
+                        error_msg = str(simulate_result.value.err)
+                        if "Provided owner is not allowed" in error_msg or "IllegalOwner" in error_msg:
+                            logger.error("Token-2022: Mint doesn't allow ATA creation for this recipient")
+                            logger.error("Recipient must have an existing token account for this Token-2022 mint")
+                            return None
+                    # Check logs for IllegalOwner error
+                    if simulate_result.value.logs:
+                        for log in simulate_result.value.logs:
+                            if "IllegalOwner" in log or "Provided owner is not allowed" in log:
+                                logger.error("Token-2022: Mint doesn't allow ATA creation (detected in logs)")
+                                logger.error("Recipient must have an existing token account for this Token-2022 mint")
+                                return None
             except Exception as e:
                 logger.warning(f"Simulation check failed: {e}, proceeding with transaction anyway")
         
