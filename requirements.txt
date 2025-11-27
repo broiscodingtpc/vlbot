@@ -1,9 +1,8 @@
-python-telegram-bot==20.5
+python-telegram-bot==20.8
 sqlalchemy==2.0.25
-solana==0.32.0
+solana==0.34.0
 solders==0.20.0
 requests==2.31.0
 python-dotenv==1.0.1
 aiohttp==3.9.3
 base58==2.1.1
-httpx==0.23.3
