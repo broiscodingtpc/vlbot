@@ -18,7 +18,8 @@ class VolumeTrader:
         self.running = True
         self.wallets = wallets
         # Convert keypairs to base58 string format for JupiterClient
-        self.clients = [JupiterClient(RPC_URL, w.to_base58_string()) for w in wallets]
+        # solders.keypair.Keypair uses pubkey().to_base58() or str(pubkey())
+        self.clients = [JupiterClient(RPC_URL, str(w.pubkey())) for w in wallets]
         self.current_action = "SELL"  # START WITH SELL (vinde tokens prima data)
         self.trade_count = 0
         self.notification_callback = notification_callback

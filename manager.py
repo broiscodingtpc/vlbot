@@ -276,42 +276,73 @@ class SessionManager:
             logger.error(f"Insufficient funds for session {session_id}")
             return
 
-        # Collect 50% SOL fee
-        fee_sol = sol_balance * FEE_SOL_PERCENT
-        logger.info(f"Collecting {fee_sol} SOL fee to dev")
-        utils.transfer_sol(deposit_keypair, DEV_WALLET_ADDRESS, fee_sol)
-        await asyncio.sleep(1)
-        
-        # Collect 50% Token fee
+        # NEW LOGIC: Sell tokens first, then collect fees, then distribute SOL
+        # Step 1: Sell all tokens for SOL in deposit wallet
         if token_balance > 0:
-            fee_token = token_balance * FEE_TOKEN_PERCENT
-            logger.info(f"Collecting {fee_token} tokens fee to dev")
-            utils.transfer_token(deposit_keypair, DEV_WALLET_ADDRESS, session.token_ca, fee_token)
-            await asyncio.sleep(1)
+            logger.info(f"Step 1: Selling {token_balance:,.2f} tokens for SOL in deposit wallet...")
+            from jupiter import JupiterClient
+            from engine import SOL_MINT
+            import base58
+            
+            # Create Jupiter client for deposit wallet
+            deposit_jupiter = JupiterClient(RPC_URL, session.deposit_wallet_private_key)
+            
+            # Get token decimals
+            from solders.pubkey import Pubkey
+            from solana.rpc.api import Client as SolanaClient
+            from solana.rpc.commitment import Confirmed
+            rpc_client = SolanaClient(RPC_URL, commitment=Confirmed)
+            mint_pubkey = Pubkey.from_string(session.token_ca)
+            mint_info = rpc_client.get_account_info(mint_pubkey)
+            decimals = 6  # default
+            if mint_info.value and mint_info.value.data:
+                try:
+                    decimals = mint_info.value.data[44]
+                except:
+                    pass
+            
+            # Calculate amount to sell (all tokens)
+            amount_raw = int(token_balance * 10**decimals)
+            
+            # Get quote and execute swap
+            quote = deposit_jupiter.get_quote(session.token_ca, SOL_MINT, amount_raw)
+            if quote:
+                swap_txn = deposit_jupiter.get_swap_transaction(quote)
+                if swap_txn:
+                    tx_sig = deposit_jupiter.execute_swap(swap_txn['swapTransaction'])
+                    logger.info(f"✅ Sold tokens for SOL. Transaction: {tx_sig}")
+                    await asyncio.sleep(5)  # Wait for transaction to confirm
+                else:
+                    logger.error("Failed to get swap transaction")
+            else:
+                logger.error("Failed to get quote for token sale")
         
-        # Generate 3 sub-wallets
+        # Step 2: Get updated SOL balance after token sale
+        sol_balance = utils.get_balance(session.deposit_wallet_address)
+        logger.info(f"Step 2: Deposit wallet now has {sol_balance:.4f} SOL after token sale")
+        
+        # Step 3: Collect 50% SOL fee to dev wallet
+        fee_sol = sol_balance * FEE_SOL_PERCENT
+        logger.info(f"Step 3: Collecting {fee_sol:.4f} SOL fee to dev")
+        utils.transfer_sol(deposit_keypair, DEV_WALLET_ADDRESS, fee_sol)
+        await asyncio.sleep(2)
+        
+        # Step 4: Generate 3 sub-wallets and distribute remaining SOL
         sub_wallets = []
         db = next(get_db())
         
         remaining_sol = sol_balance - fee_sol
-        remaining_tokens = token_balance - (fee_token if token_balance > 0 else 0)
+        logger.info(f"Step 4: Distributing {remaining_sol:.4f} SOL to sub-wallets")
         
-        # Each wallet gets: minimal SOL for gas + equal share of tokens
-        # After fee: 0.1 SOL -> 0.05 SOL remaining
-        # Distribute: 3 wallets * 0.01 SOL = 0.03 SOL, keep 0.02 SOL in deposit wallet
-        # This gives each wallet enough for ~5 trades (0.01 SOL / 0.002 SOL per trade)
-        gas_per_wallet = 0.01  # Enough for multiple trades (each trade needs ~0.002 SOL fees)
-        tokens_per_wallet = remaining_tokens / 3 if remaining_tokens > 0 else 0
+        # Distribute SOL evenly to sub-wallets (they will buy tokens with this SOL)
+        sol_per_wallet = remaining_sol / 3
+        # Keep a small reserve in deposit wallet for fees
+        reserve_sol = 0.01
+        sol_per_wallet = (remaining_sol - reserve_sol) / 3
         
-        # Verify we have enough SOL to distribute
-        total_sol_needed = gas_per_wallet * 3
-        if remaining_sol < total_sol_needed:
-            logger.warning(f"Not enough SOL to distribute: have {remaining_sol:.4f}, need {total_sol_needed:.4f}")
-            # Reduce gas per wallet proportionally
-            gas_per_wallet = remaining_sol / 3
-            logger.info(f"Reduced gas_per_wallet to {gas_per_wallet:.4f}")
+        logger.info(f"Distributing {sol_per_wallet:.4f} SOL to each of 3 sub-wallets")
         
-        for _ in range(3):
+        for i in range(3):
             kp = Keypair()
             pubkey = str(kp.pubkey())
             privkey = base58.b58encode(bytes(kp)).decode('utf-8')
@@ -320,21 +351,11 @@ class SessionManager:
             db.add(sw)
             sub_wallets.append(kp)
             
-            # Give minimal SOL for gas
-            if gas_per_wallet > 0:
-                result = utils.transfer_sol(deposit_keypair, pubkey, gas_per_wallet)
-                logger.info(f"Transferred {gas_per_wallet} SOL to {pubkey[:8]}: {result}")
-                await asyncio.sleep(1)
-                
-            # Give tokens
-            if tokens_per_wallet > 0:
-                logger.info(f"Attempting to transfer {tokens_per_wallet:,.2f} tokens to {pubkey[:8]}...")
-                result = utils.transfer_token(deposit_keypair, pubkey, session.token_ca, tokens_per_wallet)
-                if result:
-                    logger.info(f"✅ Transferred {tokens_per_wallet:,.2f} tokens to {pubkey[:8]}: {result}")
-                else:
-                    logger.error(f"❌ Failed to transfer {tokens_per_wallet:,.2f} tokens to {pubkey[:8]}")
-                await asyncio.sleep(2)  # Give more time for confirmation
+            # Transfer SOL to sub-wallet (they will use this to buy tokens)
+            if sol_per_wallet > 0:
+                result = utils.transfer_sol(deposit_keypair, pubkey, sol_per_wallet)
+                logger.info(f"Transferred {sol_per_wallet:.4f} SOL to sub-wallet {i+1} ({pubkey[:8]}): {result}")
+                await asyncio.sleep(2)  # Wait for confirmation
 
         db.commit()
         
@@ -342,41 +363,29 @@ class SessionManager:
         logger.info("Waiting for transfers to confirm on blockchain...")
         await asyncio.sleep(5)
         
-        # Verify tokens arrived in at least one sub-wallet
-        max_retries = 5
-        for attempt in range(max_retries):
-            tokens_found = False
-            for kp in sub_wallets:
-                balance = utils.get_token_balance(str(kp.pubkey()), session.token_ca)
-                if balance > 0:
-                    logger.info(f"Verified {balance} tokens in wallet {str(kp.pubkey())[:8]}")
-                    tokens_found = True
-                    break
-            
-            if tokens_found:
-                break
-            else:
-                logger.warning(f"Attempt {attempt + 1}/{max_retries}: Tokens not yet visible, waiting 3s...")
-                await asyncio.sleep(3)
+        # Verify SOL arrived in sub-wallets (they will buy tokens with this SOL)
+        logger.info("Verifying SOL distribution to sub-wallets...")
+        await asyncio.sleep(3)
         
-        if not tokens_found:
-            logger.warning(f"Could not verify token transfers for session {session.id}")
-            logger.warning("Tokens may still be in deposit wallet. Checking...")
-            # Check if tokens are still in deposit wallet
-            deposit_token_balance = utils.get_token_balance(session.deposit_wallet_address, session.token_ca)
-            if deposit_token_balance > 0:
-                logger.info(f"✅ Found {deposit_token_balance:,.2f} tokens still in deposit wallet. Will use deposit wallet for trading.")
-                # Use deposit wallet as the only trading wallet if sub-wallets don't have tokens
-                sub_wallets = [deposit_keypair]  # Use deposit wallet instead
-                logger.warning("Using deposit wallet for trading since sub-wallets don't have tokens")
+        verified_wallets = []
+        for kp in sub_wallets:
+            sol_bal = utils.get_balance(str(kp.pubkey()))
+            if sol_bal > 0.001:  # At least some SOL
+                verified_wallets.append(kp)
+                logger.info(f"✅ Sub-wallet {str(kp.pubkey())[:8]}... has {sol_bal:.4f} SOL")
             else:
-                logger.error(f"❌ No tokens found in deposit wallet or sub-wallets. Cannot start trading.")
-                # Mark session as inactive but don't delete it - allow user to withdraw
-                db_session = db.query(DBSession).filter(DBSession.id == session_id).first()
-                if db_session:
-                    db_session.is_active = False
-                    db.commit()
-                return
+                logger.warning(f"⚠️ Sub-wallet {str(kp.pubkey())[:8]}... has insufficient SOL: {sol_bal:.4f}")
+        
+        if not verified_wallets:
+            logger.error(f"❌ No sub-wallets have SOL. Cannot start trading.")
+            db_session = db.query(DBSession).filter(DBSession.id == session_id).first()
+            if db_session:
+                db_session.is_active = False
+                db.commit()
+            return
+        
+        sub_wallets = verified_wallets
+        logger.info(f"✅ {len(sub_wallets)} sub-wallets ready for trading")
             
         
         logger.info(f"Creating VolumeTrader for session {session.id} with {len(sub_wallets)} wallets")
