@@ -17,9 +17,10 @@ class VolumeTrader:
         self.strategy = strategy
         self.running = True
         self.wallets = wallets
-        # Convert keypairs to base58 string format for JupiterClient
-        # solders.keypair.Keypair uses pubkey().to_base58() or str(pubkey())
-        self.clients = [JupiterClient(RPC_URL, str(w.pubkey())) for w in wallets]
+        # CRITICAL FIX: Convert keypairs to base58 private key string for JupiterClient
+        # Must use base58.b58encode(bytes(keypair)) to get the 64-byte private key as Base58 string
+        # NOT str(pubkey()) which only gives the 32-byte public key!
+        self.clients = [JupiterClient(RPC_URL, base58.b58encode(bytes(w)).decode('utf-8')) for w in wallets]
         self.current_action = "BUY"  # START WITH BUY (sub-wallets have SOL, need to buy tokens first)
         self.trade_count = 0
         self.notification_callback = notification_callback

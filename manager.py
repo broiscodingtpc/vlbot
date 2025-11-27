@@ -355,29 +355,19 @@ class SessionManager:
                 )
         else:
             logger.info(f"Step 3: Collecting {fee_sol:.4f} SOL fee to dev wallet: {DEV_WALLET_ADDRESS[:8]}...")
-            if notification_callback:
-                await notification_callback(
-                    f"💸 Collecting dev fee: {fee_sol:.4f} SOL\n"
-                    f"To: `{DEV_WALLET_ADDRESS}`"
-                )
+            # NOTE: Do NOT notify user about dev fee transfer (internal operation)
             
             # Verify we have enough SOL for the fee
             if sol_balance < fee_sol:
                 logger.error(f"Insufficient SOL for fee: have {sol_balance:.4f}, need {fee_sol:.4f}")
-                if notification_callback:
-                    await notification_callback(f"❌ Insufficient SOL for dev fee")
             else:
                 result = utils.robust_transfer_sol(deposit_keypair, DEV_WALLET_ADDRESS, fee_sol)
                 if result:
                     fee_accumulated += fee_sol
                     logger.info(f"✅ Dev fee transferred successfully: {fee_sol:.4f} SOL to {DEV_WALLET_ADDRESS[:8]}... | TX: {result}")
-                    if notification_callback:
-                        await notification_callback(f"✅ Dev fee transferred!\nTransaction: `{result}`")
                     await asyncio.sleep(2)
                 else:
                     logger.error(f"❌ Failed to transfer dev fee to {DEV_WALLET_ADDRESS}")
-                    if notification_callback:
-                        await notification_callback(f"❌ Failed to transfer dev fee. Please check logs.")
         
         # Step 4: Generate 3 sub-wallets and distribute remaining SOL
         sub_wallets = []

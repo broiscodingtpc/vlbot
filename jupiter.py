@@ -99,17 +99,45 @@ class JupiterClient:
             # Deserialize as VersionedTransaction
             txn = VersionedTransaction.from_bytes(raw_txn)
             
+            # CRITICAL: Verify keypair is valid before signing
+            if not self.keypair:
+                logger.error("Keypair is None or invalid")
+                return None
+            
             # Sign transaction - VersionedTransaction needs to be signed via message signing
-            signature = self.keypair.sign_message(bytes(txn.message))
-            # Replace the first signature (payer signature)
+            # The message must be signed with the payer's keypair
+            message_bytes = bytes(txn.message)
+            signature = self.keypair.sign_message(message_bytes)
+            
+            # Replace the first signature (payer signature) - Jupiter returns transaction with payer as first signer
+            if len(txn.signatures) == 0:
+                logger.error("Transaction has no signatures array")
+                return None
+            
             txn.signatures[0] = signature
             
-            # Send transaction
-            result = self.client.send_raw_transaction(bytes(txn))
+            # Verify signature before sending
+            logger.debug(f"Signing transaction with keypair: {str(self.keypair.pubkey())[:8]}...")
+            logger.debug(f"Transaction has {len(txn.signatures)} signatures")
             
-            return result.value
+            # Send transaction with retry logic
+            try:
+                result = self.client.send_raw_transaction(bytes(txn))
+                if result.value:
+                    logger.info(f"✅ Swap transaction sent successfully: {result.value}")
+                    return result.value
+                else:
+                    logger.error(f"Transaction send returned None: {result}")
+                    return None
+            except Exception as send_error:
+                logger.error(f"Failed to send transaction: {send_error}")
+                # Log more details about the transaction
+                logger.debug(f"Transaction message: {message_bytes[:50]}...")
+                logger.debug(f"Signature: {signature}")
+                raise
+            
         except Exception as e:
             logger.error(f"Execute swap failed: {e}")
             import traceback
-            traceback.print_exc()
+            logger.error(traceback.format_exc())
             return None
