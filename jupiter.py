@@ -104,23 +104,43 @@ class JupiterClient:
                 logger.error("Keypair is None or invalid")
                 return None
             
-            # Sign transaction - VersionedTransaction needs to be signed via message signing
-            # The message must be signed with the payer's keypair
-            message_bytes = bytes(txn.message)
-            signature = self.keypair.sign_message(message_bytes)
+            # Get payer pubkey from transaction message
+            payer_pubkey = self.keypair.pubkey()
+            logger.info(f"Signing transaction with payer: {str(payer_pubkey)[:8]}...")
             
-            # Replace the first signature (payer signature) - Jupiter returns transaction with payer as first signer
+            # CRITICAL FIX: For VersionedTransaction, we need to use partial_sign
+            # Jupiter returns a transaction that needs to be signed by the user (payer)
+            # The transaction already has the payer set, we just need to sign it correctly
+            
+            # Method 1: Use partial_sign (recommended for VersionedTransaction)
+            try:
+                # partial_sign adds our signature to the transaction
+                txn.partial_sign([self.keypair])
+                logger.debug(f"Transaction signed using partial_sign")
+            except Exception as partial_sign_error:
+                logger.warning(f"partial_sign failed: {partial_sign_error}, trying manual signing...")
+                # Fallback: Manual signing
+                message_bytes = bytes(txn.message)
+                signature = self.keypair.sign_message(message_bytes)
+                
+                # Find the index of our pubkey in the signers list
+                # The first signer is usually the payer
+                if len(txn.signatures) == 0:
+                    logger.error("Transaction has no signatures array")
+                    return None
+                
+                # Replace the first signature (payer signature)
+                txn.signatures[0] = signature
+                logger.debug(f"Transaction signed manually, signature index 0 replaced")
+            
+            # Verify we have signatures
             if len(txn.signatures) == 0:
-                logger.error("Transaction has no signatures array")
+                logger.error("Transaction has no signatures after signing")
                 return None
             
-            txn.signatures[0] = signature
-            
-            # Verify signature before sending
-            logger.debug(f"Signing transaction with keypair: {str(self.keypair.pubkey())[:8]}...")
             logger.debug(f"Transaction has {len(txn.signatures)} signatures")
             
-            # Send transaction with retry logic
+            # Send transaction
             try:
                 result = self.client.send_raw_transaction(bytes(txn))
                 if result.value:
@@ -131,9 +151,11 @@ class JupiterClient:
                     return None
             except Exception as send_error:
                 logger.error(f"Failed to send transaction: {send_error}")
-                # Log more details about the transaction
-                logger.debug(f"Transaction message: {message_bytes[:50]}...")
-                logger.debug(f"Signature: {signature}")
+                # Log transaction details for debugging
+                logger.error(f"Payer pubkey: {str(payer_pubkey)}")
+                logger.error(f"Number of signatures: {len(txn.signatures)}")
+                if len(txn.signatures) > 0:
+                    logger.error(f"First signature: {txn.signatures[0]}")
                 raise
             
         except Exception as e:

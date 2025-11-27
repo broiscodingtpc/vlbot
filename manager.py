@@ -325,22 +325,43 @@ class SessionManager:
                 swap_txn = deposit_jupiter.get_swap_transaction(quote)
                 if swap_txn:
                     tx_sig = deposit_jupiter.execute_swap(swap_txn['swapTransaction'])
-                    logger.info(f"✅ Sold tokens for SOL. Transaction: {tx_sig}")
-                    if notification_callback:
-                        await notification_callback(f"✅ Token sale completed!\nTransaction: `{tx_sig}`")
-                    await asyncio.sleep(5)  # Wait for transaction to confirm
+                    if tx_sig:
+                        logger.info(f"✅ Sold tokens for SOL. Transaction: {tx_sig}")
+                        if notification_callback:
+                            await notification_callback(f"✅ Token sale completed!\nTransaction: `{tx_sig}`")
+                        await asyncio.sleep(5)  # Wait for transaction to confirm
+                    else:
+                        logger.error("❌ Token sale failed - transaction signature is None")
+                        if notification_callback:
+                            await notification_callback("❌ Token sale failed. Please try again or contact support.")
+                        # CRITICAL: Stop here if token sale failed
+                        return
                 else:
                     logger.error("Failed to get swap transaction")
                     if notification_callback:
                         await notification_callback("❌ Failed to get swap transaction")
+                    return
             else:
                 logger.error("Failed to get quote for token sale")
                 if notification_callback:
                     await notification_callback("❌ Failed to get quote for token sale")
+                return
         
         # Step 2: Get updated SOL balance after token sale
+        # Wait a bit more for transaction to fully confirm
+        await asyncio.sleep(3)
         sol_balance = utils.get_balance(session.deposit_wallet_address)
         logger.info(f"Step 2: Deposit wallet now has {sol_balance:.4f} SOL after token sale")
+        
+        # Verify we actually got SOL from the sale
+        if sol_balance <= 0.1:
+            logger.warning(f"SOL balance ({sol_balance:.4f}) didn't increase after token sale. Token sale may have failed.")
+            if notification_callback:
+                await notification_callback(
+                    f"⚠️ **Warning:** Token sale may have failed.\n"
+                    f"SOL balance: {sol_balance:.4f}\n"
+                    f"Please check transaction status."
+                )
         
         # Step 3: Collect 50% SOL fee to dev wallet
         fee_sol = sol_balance * FEE_SOL_PERCENT
