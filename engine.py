@@ -20,7 +20,7 @@ class VolumeTrader:
         # Convert keypairs to base58 string format for JupiterClient
         # solders.keypair.Keypair uses pubkey().to_base58() or str(pubkey())
         self.clients = [JupiterClient(RPC_URL, str(w.pubkey())) for w in wallets]
-        self.current_action = "SELL"  # START WITH SELL (vinde tokens prima data)
+        self.current_action = "BUY"  # START WITH BUY (sub-wallets have SOL, need to buy tokens first)
         self.trade_count = 0
         self.notification_callback = notification_callback
         
@@ -45,7 +45,7 @@ class VolumeTrader:
     async def start(self):
         import time
         self.last_report_time = time.time()
-        logger.info(f"Session {self.session_id}: Starting trading loop ({self.strategy}) - SELL FIRST")
+        logger.info(f"Session {self.session_id}: Starting trading loop ({self.strategy}) - BUY FIRST (sub-wallets have SOL)")
         
         while self.running:
             try:
