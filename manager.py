@@ -4,7 +4,7 @@ import base58
 import asyncio
 from engine import VolumeTrader
 import utils
-from config import DEV_WALLET_ADDRESS, FEE_SOL_PERCENT, FEE_TOKEN_PERCENT, RPC_URL, SOL_BUFFER, MIN_TRADE_SOL_THRESHOLD, SOL_PRICE_USD
+from config import DEV_WALLET_ADDRESS, FEE_SOL_PERCENT, FEE_SALE_PERCENT, RPC_URL, SOL_BUFFER, MIN_TRADE_SOL_THRESHOLD, SOL_PRICE_USD
 from solders.pubkey import Pubkey as SoldersPubkey
 import logging
 
