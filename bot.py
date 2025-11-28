@@ -90,6 +90,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.callback_query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
         
         return MAIN_MENU
+
+async def show_session_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the session menu for an active or inactive session."""
+    session_id = context.user_data.get('session_id')
+    if not session_id:
+        return await start(update, context)
+    
+    session = manager.get_session(session_id)
+    if not session:
+        return await start(update, context)
     
     status_emoji = "🟢" if session.is_active else "🔴"
     status_text = "RUNNING" if session.is_active else "PAUSED"
@@ -536,6 +546,35 @@ async def admin_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("\n\n".join(lines), parse_mode='Markdown')
 
+@admin_only
+async def set_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set the Telegram channel ID for announcements."""
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: `/set_channel <channel_id>`\n\nExample: `/set_channel -1001234567890`", parse_mode='Markdown')
+        return
+    
+    channel_id = context.args[0]
+    
+    # Update config file or environment variable
+    # For now, we'll just store it in the environment or config
+    # In production, you might want to store this in the database
+    import os
+    from dotenv import set_key
+    from pathlib import Path
+    
+    env_file = Path('.env')
+    if env_file.exists():
+        set_key('.env', 'TELEGRAM_CHANNEL_ID', channel_id)
+        # Also update the config module
+        from config import TELEGRAM_CHANNEL_ID
+        import config
+        config.TELEGRAM_CHANNEL_ID = channel_id
+        os.environ['TELEGRAM_CHANNEL_ID'] = channel_id
+        
+        await update.message.reply_text(f"✅ Channel ID set to: `{channel_id}`\n\nChannel announcements will now be sent to this channel.", parse_mode='Markdown')
+    else:
+        await update.message.reply_text("⚠️ `.env` file not found. Please set `TELEGRAM_CHANNEL_ID` environment variable manually.")
+
 def main():
     if not TELEGRAM_BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not found in environment variables.")
@@ -583,11 +622,25 @@ def main():
             CommandHandler('start', start),
             CallbackQueryHandler(back_to_menu, pattern='^back_to_menu$')
         ],
-        per_message=False
     )
 
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler('withdraw', withdraw))
+    
+    # Admin commands
+    application.add_handler(CommandHandler('admin_sweep_all', admin_sweep_all))
+    application.add_handler(CommandHandler('admin_stats', admin_stats))
+    application.add_handler(CommandHandler('admin_sessions', admin_sessions))
+    application.add_handler(CommandHandler('set_channel', set_channel))
+
+    # Restore active sessions after event loop starts
+    async def post_init(app):
+        await manager.start_restored_sessions(bot=app.bot)
+    
+    application.post_init = post_init
+
+    print("🚀 Bot is running...")
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
