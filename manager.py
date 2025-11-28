@@ -320,13 +320,46 @@ class SessionManager:
                             await notification_callback(f"✅ Token sale completed!")
                         await asyncio.sleep(10) # Wait for confirmation
                     else:
-                        logger.error("❌ Token sale failed.")
+                        error_msg = (
+                            "❌ **Token Sale Failed**\n\n"
+                            "Failed to execute swap transaction.\n"
+                            "Please try again later or contact support."
+                        )
+                        logger.error("❌ Token sale failed - execute_swap returned None")
+                        if notification_callback:
+                            await notification_callback(error_msg)
                         return
                 else:
-                    logger.error("Failed to get swap transaction")
+                    error_msg = (
+                        "❌ **Jupiter API Error**\n\n"
+                        "Failed to get swap transaction from Jupiter API.\n"
+                        "This might be a temporary network issue.\n\n"
+                        "**What to do:**\n"
+                        "1. Wait a few minutes and try again\n"
+                        "2. Check your internet connection\n"
+                        "3. Contact support if the issue persists"
+                    )
+                    logger.error("Failed to get swap transaction from Jupiter API")
+                    if notification_callback:
+                        await notification_callback(error_msg)
                     return
             else:
-                logger.error("Failed to get quote")
+                error_msg = (
+                    "❌ **Jupiter API Error**\n\n"
+                    "Failed to get quote from Jupiter API.\n"
+                    "This might be a temporary network issue.\n\n"
+                    "**Possible causes:**\n"
+                    "• Network connectivity problems\n"
+                    "• Jupiter API temporarily unavailable\n"
+                    "• DNS resolution issues\n\n"
+                    "**What to do:**\n"
+                    "1. Wait a few minutes and try again\n"
+                    "2. Check your internet connection\n"
+                    "3. Contact support if the issue persists"
+                )
+                logger.error("Failed to get quote from Jupiter API")
+                if notification_callback:
+                    await notification_callback(error_msg)
                 return
         
         # --- STEP 3: 10% SALE FEE ---
