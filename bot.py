@@ -62,6 +62,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome_text = (
             "🔥 **KodeS Volume Bot** 🔥\n\n"
             "The **MOST AFFORDABLE** volume generation solution on Solana!\n\n"
+            "📢 **Official Channel:** [Kodeprint](https://t.me/Kodeprint)\n"
+            "_Join for Token Calls, Updates & Community!_\n\n"
             "**💎 Why Volume Matters?**\n"
             "📈 **Trending Power**: High volume = Trending status on DexScreener, Birdeye & Jupiter\n"
             "🚀 **Investor Magnet**: Real trading activity attracts serious investors\n"
@@ -77,7 +79,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = [
             [InlineKeyboardButton("🚀 Start Volume Session", callback_data='new_session')],
-            [InlineKeyboardButton("💰 Withdraw Funds", callback_data='withdraw_menu')]
+            [InlineKeyboardButton("💰 Withdraw Funds", callback_data='withdraw_menu')],
+            [InlineKeyboardButton("📢 Join Channel", url='https://t.me/Kodeprint')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -85,43 +88,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
         else:
             await update.callback_query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
-        
-        return MAIN_MENU
-
-async def show_session_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show menu for users with active session."""
-    session_id = context.user_data.get('session_id')
-    session = manager.get_session(session_id)
-    
-    if not session:
-        return await start(update, context)
-    
-    # Check if session actually has sub-wallets (was properly started)
-    from database import get_db, SubWallet
-    db = next(get_db())
-    sub_wallets = db.query(SubWallet).filter(SubWallet.session_id == session.id).all()
-    
-    # If no sub-wallets, session was never properly started - allow reset
-    if not sub_wallets:
-        menu_text = (
-            f"⚠️ **Incomplete Session**\n\n"
-            f"📍 Token: `{session.token_ca}`\n"
-            f"💎 Strategy: **{session.strategy.upper()}**\n\n"
-            f"This session was never properly started (no deposit confirmed).\n\n"
-            f"You can withdraw any funds or start a new session."
-        )
-        
-        keyboard = [
-            [InlineKeyboardButton("💰 Withdraw Funds", callback_data='withdraw_menu')],
-            [InlineKeyboardButton("🔄 Start New Session", callback_data='new_session')],
-            [InlineKeyboardButton("🗑️ Delete This Session", callback_data='delete_session')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        if update.message:
-            await update.message.reply_text(menu_text, reply_markup=reply_markup, parse_mode='Markdown')
-        else:
-            await update.callback_query.edit_message_text(menu_text, reply_markup=reply_markup, parse_mode='Markdown')
         
         return MAIN_MENU
     
@@ -622,20 +588,6 @@ def main():
 
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler('withdraw', withdraw))
-    
-    # Admin commands
-    application.add_handler(CommandHandler('admin_sweep_all', admin_sweep_all))
-    application.add_handler(CommandHandler('admin_stats', admin_stats))
-    application.add_handler(CommandHandler('admin_sessions', admin_sessions))
-
-    # Restore active sessions after event loop starts
-    async def post_init(app):
-        await manager.start_restored_sessions(bot=app.bot)
-    
-    application.post_init = post_init
-
-    print("🚀 Bot is running...")
-    application.run_polling()
 
 if __name__ == '__main__':
     main()

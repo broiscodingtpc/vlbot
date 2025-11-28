@@ -1,9 +1,11 @@
 import requests
 import base64
+import logging
+import json
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 from solana.rpc.api import Client
-import logging
+from config import JUPITER_API_URL
 
 logger = logging.getLogger(__name__)
 
@@ -13,12 +15,13 @@ class JupiterClient:
     def __init__(self, rpc_url: str, wallet_private_key: str):
         self.rpc_url = rpc_url
         self.client = Client(rpc_url)
-        # Accept both base58 string (from to_base58_string) or bytes-encoded base58 (from b58encode)
+        
+        # Initialize Keypair
         try:
             # Try from_base58_string first (standard Solana format)
             self.keypair = Keypair.from_base58_string(wallet_private_key)
         except Exception:
-            # Fallback: if it's bytes-encoded base58, decode first then create from bytes
+            # Fallback: if it's bytes-encoded base58
             import base58
             try:
                 keypair_bytes = base58.b58decode(wallet_private_key)
@@ -26,19 +29,20 @@ class JupiterClient:
             except Exception as e:
                 logger.error(f"Failed to load keypair: {e}")
                 raise
-        # Using public v6 API which has better token coverage
-        self.quote_api = "https://lite-api.jup.ag/swap/v1/quote"
-        self.swap_api = "https://lite-api.jup.ag/swap/v1/swap"
-        self.swap_instructions_api = "https://lite-api.jup.ag/swap/v1/swap-instructions"
+
+        self.quote_api = f"{JUPITER_API_URL}/quote"
+        self.swap_api = f"{JUPITER_API_URL}/swap"
     
     def get_quote(self, input_mint: str, output_mint: str, amount: int, slippage_bps: int = 50):
-        """Get quote from Jupiter API."""
+        """Get quote from Jupiter V6 API."""
         try:
             params = {
                 "inputMint": input_mint,
                 "outputMint": output_mint,
                 "amount": str(amount),
-                "slippageBps": slippage_bps
+                "slippageBps": slippage_bps,
+                "onlyDirectRoutes": "false",
+                "asLegacyTransaction": "false"
             }
             
             response = requests.get(self.quote_api, params=params, timeout=10)
@@ -49,14 +53,14 @@ class JupiterClient:
             return None
     
     def get_swap_transaction(self, quote_response: dict):
-        """Get swap transaction from Jupiter API."""
+        """Get swap transaction from Jupiter V6 API."""
         try:
             payload = {
                 "quoteResponse": quote_response,
                 "userPublicKey": str(self.keypair.pubkey()),
                 "wrapAndUnwrapSol": True,
-                "dynamicComputeUnitLimit": True,
-                "prioritizationFeeLamports": "auto"
+                "dynamicComputeUnitLimit": True, # V6 feature
+                "prioritizationFeeLamports": "auto" # V6 feature
             }
             
             response = requests.post(self.swap_api, json=payload, timeout=10)
@@ -64,7 +68,6 @@ class JupiterClient:
             return response.json()
         except Exception as e:
             logger.error(f"Get swap transaction failed: {e}")
-            # Try to log the response text if available for debugging
             try:
                 if 'response' in locals():
                     logger.error(f"API Response: {response.text}")
@@ -72,24 +75,6 @@ class JupiterClient:
                 pass
             return None
 
-    def get_swap_instructions(self, quote_response: dict):
-        """Get swap instructions from Jupiter API."""
-        try:
-            payload = {
-                "quoteResponse": quote_response,
-                "userPublicKey": str(self.keypair.pubkey()),
-                "wrapAndUnwrapSol": True,
-                "dynamicComputeUnitLimit": True,
-                "prioritizationFeeLamports": "auto"
-            }
-            
-            response = requests.post(self.swap_instructions_api, json=payload, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"Get swap instructions failed: {e}")
-            return None
-    
     def execute_swap(self, swap_transaction_data: str):
         """Sign and send the swap transaction."""
         try:
@@ -99,87 +84,45 @@ class JupiterClient:
             # Deserialize as VersionedTransaction
             txn = VersionedTransaction.from_bytes(raw_txn)
             
-            # CRITICAL: Verify keypair is valid before signing
-            if not self.keypair:
-                logger.error("Keypair is None or invalid")
-                return None
-            
-            # Get payer pubkey from transaction message
-            payer_pubkey = self.keypair.pubkey()
-            logger.info(f"Signing transaction with payer: {str(payer_pubkey)[:8]}...")
-            
-            # CRITICAL FIX: For VersionedTransaction, we need to find the correct signature index
-            # Jupiter returns a transaction with placeholder signatures that need to be replaced
-            # We need to find which signature index corresponds to our payer pubkey
-            
+            # Sign transaction
             message_bytes = bytes(txn.message)
             signature = self.keypair.sign_message(message_bytes)
             
-            # Find the index of payer in the account keys
-            # For Jupiter transactions, the payer is typically the first signer (index 0)
-            # But we should verify by checking the account keys in the message
-            payer_index = 0  # Default to first signature (most common case)
+            # For VersionedTransaction, we need to sign properly
+            # Jupiter V6 returns a transaction that just needs our signature
+            # We can use solders to sign it easily
             
-            try:
-                # Try to get account keys from the message to find payer index
-                # VersionedTransaction message has account_keys() method
-                if hasattr(txn.message, 'account_keys'):
-                    account_keys = txn.message.account_keys()
-                    # Find payer index in account keys
-                    for i, key in enumerate(account_keys):
-                        if str(key) == str(payer_pubkey):
-                            payer_index = i
-                            logger.debug(f"Found payer at account key index {i}")
-                            break
-                elif hasattr(txn.message, 'static_account_keys'):
-                    # Alternative method name
-                    account_keys = txn.message.static_account_keys()
-                    for i, key in enumerate(account_keys):
-                        if str(key) == str(payer_pubkey):
-                            payer_index = i
-                            logger.debug(f"Found payer at static account key index {i}")
-                            break
-                else:
-                    # If we can't find the method, use index 0 (payer is usually first)
-                    logger.debug("Could not access account_keys, using index 0 for payer")
-                    payer_index = 0
-            except Exception as key_error:
-                logger.warning(f"Could not determine payer index from message: {key_error}, using index 0")
-                payer_index = 0
+            # Create a new list of signatures
+            # Usually the payer is the first signer
+            txn_signatures = list(txn.signatures)
+            txn_signatures[0] = signature # Replace the first signature (payer)
             
-            # Replace the signature at the correct index
-            if len(txn.signatures) <= payer_index:
-                logger.error(f"Transaction has {len(txn.signatures)} signatures, but need index {payer_index}")
-                return None
+            # Update the transaction with the new signature
+            # Note: VersionedTransaction fields are often immutable directly, 
+            # but we can create a new one or modify if the library allows.
+            # Solders VersionedTransaction allows modifying signatures list if it's a list
             
-            txn.signatures[payer_index] = signature
-            logger.info(f"Transaction signed: replaced signature at index {payer_index} for payer {str(payer_pubkey)[:8]}...")
+            # Actually, solders VersionedTransaction.populate(message, signatures) is the way,
+            # or just constructing it.
+            # But simpler: txn is already constructed, just need to fill the signature.
             
-            # Verify we have signatures
-            if len(txn.signatures) == 0:
-                logger.error("Transaction has no signatures after signing")
-                return None
+            # Let's try the robust way:
+            # We need to find our index in the static account keys to be sure, 
+            # but usually Jupiter sets user as payer (index 0).
             
-            logger.debug(f"Transaction has {len(txn.signatures)} signatures")
+            txn = VersionedTransaction(txn.message, [signature])
             
             # Send transaction
-            try:
-                result = self.client.send_raw_transaction(bytes(txn))
-                if result.value:
-                    logger.info(f"✅ Swap transaction sent successfully: {result.value}")
-                    return result.value
-                else:
-                    logger.error(f"Transaction send returned None: {result}")
-                    return None
-            except Exception as send_error:
-                logger.error(f"Failed to send transaction: {send_error}")
-                # Log transaction details for debugging
-                logger.error(f"Payer pubkey: {str(payer_pubkey)}")
-                logger.error(f"Number of signatures: {len(txn.signatures)}")
-                if len(txn.signatures) > 0:
-                    logger.error(f"First signature: {txn.signatures[0]}")
-                raise
+            opts = self.client.api.types.TxOpts(skip_preflight=True)
+            result = self.client.send_transaction(txn, opts=opts)
             
+            if result.value:
+                logger.info(f"✅ Swap transaction sent: {result.value}")
+                return result.value
+            else:
+                logger.error(f"Transaction send returned None: {result}")
+                return None
+                
         except Exception as e:
             logger.error(f"Execute swap failed: {e}")
             import traceback

@@ -4,38 +4,23 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Telegram
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMIN_TELEGRAM_ID = 8342160274  # Owner/Dev ID (hardcoded)
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+ADMIN_TELEGRAM_ID = int(os.getenv('ADMIN_TELEGRAM_ID', '0'))
+TELEGRAM_CHANNEL_ID = os.getenv('TELEGRAM_CHANNEL_ID') # Channel ID for announcements
 
-# Solana
-RPC_URL = os.getenv("RPC_URL", "https://api.mainnet-beta.solana.com")
-DEV_WALLET_ADDRESS = os.getenv("DEV_WALLET_ADDRESS", "YourDevWalletAddressHere")
-
-# Trading Constants
-SOL_BUFFER = 0.05  # SOL rămas în wallet pentru fees
-MIN_TRADE_SOL_THRESHOLD = 0.005  # Limita minimă SOL pentru a începe un ciclu
-SOL_PRICE_USD = 240.0  # Preț SOL pentru estimare USD (poate fi actualizat dinamic)
-
-# Fees
-FEE_SOL_PERCENT = 0.5  # 50% of deposited SOL goes to dev
-FEE_TOKEN_PERCENT = 0.0  # 0% - no fee on tokens, only SOL
+# Wallet
+DEV_WALLET_ADDRESS = os.getenv('DEV_WALLET_ADDRESS', 'YourDevWalletAddressHere')
 
 # Database
-# Railway provides PostgreSQL via DATABASE_URL environment variable
-# Fallback to SQLite for local development
-DATABASE_URL = os.getenv('DATABASE_URL')
-if DATABASE_URL:
-    # PostgreSQL on Railway (or other cloud providers)
-    # Railway provides DATABASE_URL in format: postgresql://user:pass@host:port/dbname
-    # SQLAlchemy needs postgresql:// but Railway might provide postgres://
-    if DATABASE_URL.startswith('postgres://'):
-        DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
-    DB_PATH = DATABASE_URL
-else:
-    # SQLite for local development
-    DATABASE_PATH = os.getenv('DATABASE_PATH', 'volumebot.db')
-    # Ensure directory exists
-    db_dir = os.path.dirname(DATABASE_PATH) if os.path.dirname(DATABASE_PATH) else '.'
-    if db_dir and not os.path.exists(db_dir):
-        os.makedirs(db_dir, exist_ok=True)
-    DB_PATH = f"sqlite:///{DATABASE_PATH}"
+DB_PATH = 'sqlite:///volumebot.db'
+
+# Solana / Jupiter
+RPC_URL = os.getenv('RPC_URL', 'https://api.mainnet-beta.solana.com')
+JUPITER_API_URL = "https://quote-api.jup.ag/v6" # V6 API
+
+# Fees & Settings
+FEE_SOL_PERCENT = 0.50  # 50% of deposited SOL
+FEE_SALE_PERCENT = 0.10 # 10% of Token Sale Proceeds (in SOL)
+SOL_BUFFER = 0.005      # Buffer for gas
+MIN_TRADE_SOL_THRESHOLD = 0.01
+SOL_PRICE_USD = 240.0   # Approximate, can be fetched dynamically

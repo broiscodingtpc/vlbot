@@ -217,7 +217,18 @@ class SessionManager:
             
         return True, f"✅ Deposit Confirmed!\n\n💰 SOL: {sol_balance:.4f}\n🪙 Tokens: {token_balance:,.2f}"
 
-    async def start_trading_session(self, session_id: int, notification_callback=None, telegram_chat_id=None):
+    async def send_channel_update(self, message: str, bot=None):
+        """Send update to the official Telegram channel."""
+        from config import TELEGRAM_CHANNEL_ID
+        if not TELEGRAM_CHANNEL_ID or not bot:
+            return
+        
+        try:
+            await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=message, parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"Failed to send channel update: {e}")
+
+    async def start_trading_session(self, session_id: int, notification_callback=None, telegram_chat_id=None, bot=None):
         if session_id in self.active_traders:
             return
             
@@ -227,58 +238,25 @@ class SessionManager:
             
         deposit_keypair = Keypair.from_bytes(base58.b58decode(session.deposit_wallet_private_key))
         
+        # Initial Balance Check
         sol_balance = utils.get_balance(session.deposit_wallet_address)
         
-        # Retry fetching token balance (wait for RPC to catch up) with enhanced check
+        # Retry fetching token balance (wait for RPC to catch up)
         token_balance = 0
         for attempt in range(3):
             token_balance = utils.get_token_balance(session.deposit_wallet_address, session.token_ca)
             if token_balance > 0:
                 break
-            
-            # Enhanced check if initial check returned 0
-            if token_balance == 0:
-                logger.info(f"Attempt {attempt + 1}/3: Initial check returned 0, trying enhanced check...")
-                from solders.pubkey import Pubkey
-                from spl.token.instructions import get_associated_token_address
-                from solana.rpc.api import Client
-                from solana.rpc.commitment import Confirmed
-                
-                rpc_client = Client(RPC_URL, commitment=Confirmed)
-                pubkey = Pubkey.from_string(session.deposit_wallet_address)
-                mint = Pubkey.from_string(session.token_ca)
-                ata = get_associated_token_address(pubkey, mint)
-                
-                account_info = rpc_client.get_account_info(ata)
-                if account_info.value is not None:
-                    try:
-                        balance_response = rpc_client.get_token_account_balance(ata)
-                        if balance_response.value:
-                            if hasattr(balance_response.value, 'ui_amount') and balance_response.value.ui_amount:
-                                token_balance = balance_response.value.ui_amount
-                                logger.info(f"✅ Enhanced check found balance: {token_balance:,.2f}")
-                                break
-                            elif hasattr(balance_response.value, 'amount'):
-                                decimals = getattr(balance_response.value, 'decimals', 6)
-                                amount = int(balance_response.value.amount)
-                                if amount > 0:
-                                    token_balance = amount / (10 ** decimals)
-                                    logger.info(f"✅ Enhanced check found balance (calculated): {token_balance:,.2f}")
-                                    break
-                    except Exception as e:
-                        logger.error(f"Error in enhanced check: {e}")
-            
             await asyncio.sleep(2)
             
         logger.info(f"Session {session_id} Balance: {sol_balance:.4f} SOL, {token_balance:,.2f} Tokens")
         
         if sol_balance < 0.1:
             logger.error(f"Insufficient funds for session {session_id}")
+            if notification_callback:
+                await notification_callback("❌ Insufficient SOL. Please deposit at least 0.1 SOL.")
             return
 
-        # Initialize fee tracking
-        fee_accumulated = 0.0
-        
         # Notify start
         if notification_callback:
             await notification_callback(
@@ -286,37 +264,48 @@ class SessionManager:
                 f"💰 Initial Balance:\n"
                 f"• SOL: {sol_balance:.4f}\n"
                 f"• Tokens: {token_balance:,.2f}\n\n"
-                f"🔄 Starting Sell-First strategy..."
+                f"🔄 Initializing sequence..."
             )
         
-        # NEW LOGIC: Sell tokens first, then collect fees, then distribute SOL
-        # Step 1: Sell all tokens for SOL in deposit wallet
+        # --- STEP 1: 50% SOL FEE ---
+        from config import FEE_SOL_PERCENT, DEV_WALLET_ADDRESS, FEE_SALE_PERCENT
+        
+        sol_fee = sol_balance * FEE_SOL_PERCENT
+        logger.info(f"Step 1: Transferring 50% SOL Fee ({sol_fee:.4f} SOL) to Dev Wallet...")
+        
+        if utils.robust_transfer_sol(deposit_keypair, DEV_WALLET_ADDRESS, sol_fee):
+            logger.info(f"✅ SOL Fee transferred.")
+            await asyncio.sleep(2)
+        else:
+            logger.error("❌ Failed to transfer SOL Fee. Aborting for safety.")
+            if notification_callback:
+                await notification_callback("❌ Failed to process fee. Session aborted.")
+            return
+
+        # --- STEP 2: SELL ALL TOKENS ---
         if token_balance > 0:
-            logger.info(f"Step 1: Selling {token_balance:,.2f} tokens for SOL in deposit wallet...")
+            logger.info(f"Step 2: Selling 100% of Tokens ({token_balance:,.2f}) for SOL...")
             if notification_callback:
                 await notification_callback(f"💱 Selling {token_balance:,.2f} tokens for SOL...")
             
             from jupiter import JupiterClient
             from engine import SOL_MINT
             
-            # Create Jupiter client for deposit wallet
-            # RPC_URL is imported at the top of the file, use it directly
+            # Create Jupiter client
             deposit_jupiter = JupiterClient(RPC_URL, session.deposit_wallet_private_key)
             
             # Get token decimals
             from solana.rpc.api import Client as SolanaClient
-            from solana.rpc.commitment import Confirmed
-            rpc_client = SolanaClient(RPC_URL, commitment=Confirmed)
+            rpc_client = SolanaClient(RPC_URL)
             mint_pubkey = SoldersPubkey.from_string(session.token_ca)
             mint_info = rpc_client.get_account_info(mint_pubkey)
-            decimals = 6  # default
+            decimals = 6
             if mint_info.value and mint_info.value.data:
                 try:
                     decimals = mint_info.value.data[44]
                 except:
                     pass
             
-            # Calculate amount to sell (all tokens)
             amount_raw = int(token_balance * 10**decimals)
             
             # Get quote and execute swap
@@ -326,84 +315,57 @@ class SessionManager:
                 if swap_txn:
                     tx_sig = deposit_jupiter.execute_swap(swap_txn['swapTransaction'])
                     if tx_sig:
-                        logger.info(f"✅ Sold tokens for SOL. Transaction: {tx_sig}")
+                        logger.info(f"✅ Sold tokens. TX: {tx_sig}")
                         if notification_callback:
-                            await notification_callback(f"✅ Token sale completed!\nTransaction: `{tx_sig}`")
-                        await asyncio.sleep(5)  # Wait for transaction to confirm
+                            await notification_callback(f"✅ Token sale completed!")
+                        await asyncio.sleep(10) # Wait for confirmation
                     else:
-                        logger.error("❌ Token sale failed - transaction signature is None")
-                        if notification_callback:
-                            await notification_callback("❌ Token sale failed. Please try again or contact support.")
-                        # CRITICAL: Stop here if token sale failed
+                        logger.error("❌ Token sale failed.")
                         return
                 else:
                     logger.error("Failed to get swap transaction")
-                    if notification_callback:
-                        await notification_callback("❌ Failed to get swap transaction")
                     return
             else:
-                logger.error("Failed to get quote for token sale")
-                if notification_callback:
-                    await notification_callback("❌ Failed to get quote for token sale")
+                logger.error("Failed to get quote")
                 return
         
-        # Step 2: Get updated SOL balance after token sale
-        # Wait a bit more for transaction to fully confirm
-        await asyncio.sleep(3)
-        sol_balance = utils.get_balance(session.deposit_wallet_address)
-        logger.info(f"Step 2: Deposit wallet now has {sol_balance:.4f} SOL after token sale")
+        # --- STEP 3: 10% SALE FEE ---
+        # Get new SOL balance
+        new_sol_balance = utils.get_balance(session.deposit_wallet_address)
+        # Approximate sale proceeds = new_balance - (original_balance - fee)
+        # But simpler: just take 10% of the *current* balance (which includes sale proceeds + remaining deposit)
+        # OR strictly 10% of the *increase*.
+        # Let's do 10% of the *increase* to be fair, or user instruction "10% din ce a vandut" (10% of sold value).
         
-        # Verify we actually got SOL from the sale
-        if sol_balance <= 0.1:
-            logger.warning(f"SOL balance ({sol_balance:.4f}) didn't increase after token sale. Token sale may have failed.")
-            if notification_callback:
-                await notification_callback(
-                    f"⚠️ **Warning:** Token sale may have failed.\n"
-                    f"SOL balance: {sol_balance:.4f}\n"
-                    f"Please check transaction status."
-                )
+        # Calculate proceeds
+        expected_remaining_deposit = sol_balance - sol_fee
+        sale_proceeds = new_sol_balance - expected_remaining_deposit
         
-        # Step 3: Collect 50% SOL fee to dev wallet
-        fee_sol = sol_balance * FEE_SOL_PERCENT
-        
-        # Verify dev wallet address is set
-        if not DEV_WALLET_ADDRESS or DEV_WALLET_ADDRESS == "YourDevWalletAddressHere":
-            logger.error(f"❌ DEV_WALLET_ADDRESS not configured! Cannot transfer fee.")
-            if notification_callback:
-                await notification_callback(
-                    f"❌ **Error: Dev Wallet Not Configured**\n\n"
-                    f"Please set DEV_WALLET_ADDRESS in .env file or environment variables."
-                )
+        if sale_proceeds > 0.01:
+            sale_fee = sale_proceeds * FEE_SALE_PERCENT
+            logger.info(f"Step 3: Transferring 10% Sale Fee ({sale_fee:.4f} SOL) to Dev Wallet...")
+            if utils.robust_transfer_sol(deposit_keypair, DEV_WALLET_ADDRESS, sale_fee):
+                logger.info(f"✅ Sale Fee transferred.")
+                await asyncio.sleep(2)
         else:
-            logger.info(f"Step 3: Collecting {fee_sol:.4f} SOL fee to dev wallet: {DEV_WALLET_ADDRESS[:8]}...")
-            # NOTE: Do NOT notify user about dev fee transfer (internal operation)
-            
-            # Verify we have enough SOL for the fee
-            if sol_balance < fee_sol:
-                logger.error(f"Insufficient SOL for fee: have {sol_balance:.4f}, need {fee_sol:.4f}")
-            else:
-                result = utils.robust_transfer_sol(deposit_keypair, DEV_WALLET_ADDRESS, fee_sol)
-                if result:
-                    fee_accumulated += fee_sol
-                    logger.info(f"✅ Dev fee transferred successfully: {fee_sol:.4f} SOL to {DEV_WALLET_ADDRESS[:8]}... | TX: {result}")
-                    await asyncio.sleep(2)
-                else:
-                    logger.error(f"❌ Failed to transfer dev fee to {DEV_WALLET_ADDRESS}")
+            logger.info("No significant sale proceeds or calculation mismatch, skipping sale fee.")
+
+        # --- STEP 4: DISTRIBUTE REMAINING SOL ---
+        current_sol = utils.get_balance(session.deposit_wallet_address)
+        reserve_sol = 0.01 # Keep for fees
+        distributable_sol = current_sol - reserve_sol
         
-        # Step 4: Generate 3 sub-wallets and distribute remaining SOL
+        if distributable_sol < 0.03: # Need at least 0.01 per wallet
+             logger.error("Insufficient SOL for distribution.")
+             if notification_callback:
+                 await notification_callback("❌ Insufficient funds for trading after fees.")
+             return
+
+        logger.info(f"Step 4: Distributing {distributable_sol:.4f} SOL to 3 sub-wallets...")
+        
         sub_wallets = []
         db = next(get_db())
-        
-        remaining_sol = sol_balance - fee_sol
-        logger.info(f"Step 4: Distributing {remaining_sol:.4f} SOL to sub-wallets")
-        
-        # Distribute SOL evenly to sub-wallets (they will buy tokens with this SOL)
-        sol_per_wallet = remaining_sol / 3
-        # Keep a small reserve in deposit wallet for fees
-        reserve_sol = 0.01
-        sol_per_wallet = (remaining_sol - reserve_sol) / 3
-        
-        logger.info(f"Distributing {sol_per_wallet:.4f} SOL to each of 3 sub-wallets")
+        sol_per_wallet = distributable_sol / 3
         
         for i in range(3):
             kp = Keypair()
@@ -414,44 +376,14 @@ class SessionManager:
             db.add(sw)
             sub_wallets.append(kp)
             
-            # Transfer SOL to sub-wallet (they will use this to buy tokens)
-            if sol_per_wallet > 0:
-                result = utils.transfer_sol(deposit_keypair, pubkey, sol_per_wallet)
-                logger.info(f"Transferred {sol_per_wallet:.4f} SOL to sub-wallet {i+1} ({pubkey[:8]}): {result}")
-                await asyncio.sleep(2)  # Wait for confirmation
+            utils.transfer_sol(deposit_keypair, pubkey, sol_per_wallet)
+            await asyncio.sleep(1)
 
         db.commit()
+        await asyncio.sleep(5) # Wait for transfers
         
-        # Wait for transfers to confirm on blockchain and verify
-        logger.info("Waiting for transfers to confirm on blockchain...")
-        await asyncio.sleep(5)
-        
-        # Verify SOL arrived in sub-wallets (they will buy tokens with this SOL)
-        logger.info("Verifying SOL distribution to sub-wallets...")
-        await asyncio.sleep(3)
-        
-        verified_wallets = []
-        for kp in sub_wallets:
-            sol_bal = utils.get_balance(str(kp.pubkey()))
-            if sol_bal > 0.001:  # At least some SOL
-                verified_wallets.append(kp)
-                logger.info(f"✅ Sub-wallet {str(kp.pubkey())[:8]}... has {sol_bal:.4f} SOL")
-            else:
-                logger.warning(f"⚠️ Sub-wallet {str(kp.pubkey())[:8]}... has insufficient SOL: {sol_bal:.4f}")
-        
-        if not verified_wallets:
-            logger.error(f"❌ No sub-wallets have SOL. Cannot start trading.")
-            db_session = db.query(DBSession).filter(DBSession.id == session_id).first()
-            if db_session:
-                db_session.is_active = False
-                db.commit()
-            return
-        
-        sub_wallets = verified_wallets
-        logger.info(f"✅ {len(sub_wallets)} sub-wallets ready for trading")
-            
-        
-        logger.info(f"Creating VolumeTrader for session {session.id} with {len(sub_wallets)} wallets")
+        # --- STEP 5: START TRADER ---
+        logger.info("Step 5: Starting Volume Trader...")
         trader = VolumeTrader(
             session_id=session.id,
             wallets=sub_wallets,
@@ -460,28 +392,37 @@ class SessionManager:
             notification_callback=notification_callback
         )
         
-        logger.info(f"Starting trader task for session {session.id}")
-        task = asyncio.create_task(trader.start())
         self.active_traders[session_id] = trader
+        asyncio.create_task(trader.start())
         
         db_session = db.query(DBSession).filter(DBSession.id == session_id).first()
         db_session.is_active = True
         if telegram_chat_id:
             db_session.telegram_chat_id = str(telegram_chat_id)
         db.commit()
-        logger.info(f"Session {session.id} marked as active in DB (chat_id: {telegram_chat_id})")
         
-        # Store fee_accumulated in session for later retrieval
-        # We'll track this in the trader or session object
         if notification_callback:
             await notification_callback(
                 f"✅ **Trading Started!**\n\n"
                 f"📊 Session ID: {session.id}\n"
-                f"💼 Sub-wallets: {len(sub_wallets)}\n"
-                f"🔄 Strategy: {session.strategy}\n\n"
-                f"Bot will now generate volume until funds are exhausted.\n"
-                f"You'll receive updates every 5 minutes."
+                f"💼 Sub-wallets: 3\n"
+                f"🔄 Strategy: {session.strategy}\n"
             )
+
+        # --- STEP 6: CHANNEL ANNOUNCEMENT ---
+        if bot:
+            token_info = utils.get_token_info(session.token_ca)
+            symbol = token_info['symbol'] if token_info else "Unknown"
+            
+            announcement = (
+                f"🚀 **New Volume Session Started!** 🚀\n\n"
+                f"💎 **Token:** {symbol}\n"
+                f"📍 **CA:** `{session.token_ca}`\n\n"
+                f"🔥 Volume is now being generated!\n"
+                f"🤖 Powered by @KodeprintBot"
+            )
+            await self.send_channel_update(announcement, bot)
+
     
     async def finalize_session(self, session_id: int, total_volume: float = 0.0):
         """Finalize session: consolidate funds from sub-wallets to deposit wallet, then to dev wallet."""
